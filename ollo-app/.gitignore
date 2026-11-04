@@ -1,0 +1,9 @@
+node_modules/
+dist/
+android/
+ios/
+src-tauri/target/
+.env
+.env.*
+.DS_Store
+Thumbs.db

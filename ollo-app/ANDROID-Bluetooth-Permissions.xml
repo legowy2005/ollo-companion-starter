@@ -1,0 +1,11 @@
+<!--
+Add these permissions directly under the top-level <manifest> element in
+android/app/src/main/AndroidManifest.xml if your generated project does not
+already include them. Keep the BLUETOOTH_SCAN neverForLocation flag aligned
+with BleClient.initialize({ androidNeverForLocation: true }).
+-->
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
