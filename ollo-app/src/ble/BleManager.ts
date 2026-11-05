@@ -4,10 +4,13 @@ import { BleClient } from '@capacitor-community/bluetooth-le';
 import type { Card, StoredImage } from '../types';
 import {
   DEVICE_NAME,
+  FLAG_CHUNKED_TEXT,
   NOTIFY_UUID,
   SERVICE_UUID,
   WRITE_UUID,
+  cardFitsLegacy,
   makeCardPacket,
+  makeChunkedCard,
   makeImageBeginPacket,
   parseDeviceInfo,
   parseStorage,
@@ -28,6 +31,13 @@ type TauriBlec = typeof import('@mnlphlp/plugin-blec');
 type PendingStatus = { resolve: (status: number) => void; reject: (error: Error) => void; timer: number };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+// The plugin's startScan() returns immediately and scans in the background,
+// so we must wait here before calling stopScan().
+async function waitFor(done: () => boolean, timeoutMs: number): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (!done() && Date.now() < end) await sleep(150);
+}
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -103,6 +113,7 @@ class OllOBleManager {
           const match = devices.find((device) => device.address.toLowerCase() === savedId.toLowerCase());
           if (match) foundAddress = match.address;
         }, 5000);
+        await waitFor(() => foundAddress !== undefined, 5000);
         try { await api.stopScan(); } catch { /* scan may already have stopped */ }
         if (!foundAddress) return false;
         await this.connectById(foundAddress);
@@ -128,17 +139,23 @@ class OllOBleManager {
       if (this.isTauriDesktop()) {
         const api = await this.getTauriApi();
         let candidate: { address: string; rssi: number } | undefined;
+        const seen = new Map<string, string>();
         await api.startScan((devices) => {
           for (const device of devices) {
+            seen.set(device.address, device.name || '(no name)');
             const hasService = device.services.some((service) => service.toLowerCase() === SERVICE_UUID);
-            const hasName = (device.name || '').toLowerCase() === DEVICE_NAME.toLowerCase();
+            const hasName = (device.name || '').toLowerCase().includes(DEVICE_NAME.toLowerCase());
             if ((hasService || hasName) && (!candidate || device.rssi > candidate.rssi)) {
               candidate = { address: device.address, rssi: device.rssi };
             }
           }
-        }, 10000);
+        }, 15000);
+        await waitFor(() => candidate !== undefined, 15000);
         try { await api.stopScan(); } catch { /* scan may already have stopped */ }
-        if (!candidate) throw new Error('No OllO glasses found. Make sure the glasses are powered on and nearby.');
+        if (!candidate) {
+          const names = [...seen.values()].slice(0, 6).join(', ');
+          throw new Error(`No OllO glasses found. Scan saw ${seen.size} Bluetooth device(s)${names ? `: ${names}` : ''}.`);
+        }
         localStorage.setItem(SAVED_DEVICE_KEY, candidate.address);
         await this.connectById(candidate.address);
       } else {
@@ -172,7 +189,7 @@ class OllOBleManager {
           this.connectedDeviceId = undefined;
           this.rejectAllPending(new Error('The glasses disconnected.'));
           this.setState('disconnected', 'Glasses disconnected');
-        }, { services: [SERVICE_UUID] });
+        });
         this.connectedDeviceId = deviceId;
         await BleClient.startNotifications(deviceId, SERVICE_UUID, NOTIFY_UUID, (value) => this.handleNotification(value));
       }
@@ -305,9 +322,34 @@ class OllOBleManager {
       const mtu = this.isTauriDesktop()
         ? await (await this.getTauriApi()).getMtu()
         : await BleClient.getMtu(this.connectedDeviceId);
-      return Math.max(15, Math.min(239, mtu - 8, 255));
+      return Math.max(15, Math.min(mtu - 8, 506));
     } catch {
       return 15;
+    }
+  }
+
+  /**
+   * Sends one card as CARD_BEGIN + CARD_TEXT pieces + CARD_END. Only CARD_END is answered, after the
+   * glasses have checked the lengths and checksum. Status 1 means a piece was missing or damaged,
+   * so the whole card is simply sent again (up to 3 tries).
+   */
+  private async sendChunkedCard(card: Card, index: number, textChunk: number): Promise<void> {
+    const packets = makeChunkedCard(card, index, textChunk);
+    for (let attempt = 1; ; attempt++) {
+      const response = this.waitForStatus(0x02);
+      void response.catch(() => undefined);
+      try {
+        await this.write(packets.begin);
+        for (const text of packets.texts) await this.write(text);
+        await this.write(packets.end);
+      } catch (error) {
+        this.rejectStatusWaiter(0x02, error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
+      const status = await response;
+      if (status === 0) return;
+      if (status !== 1 || attempt >= 3) throw new Error(this.statusDescription(0x02, status));
+      await sleep(50);
     }
   }
 
@@ -326,6 +368,20 @@ class OllOBleManager {
       return image;
     });
 
+    // Find out what this firmware supports before touching anything on the glasses.
+    if (!this.currentInfo) {
+      try { await this.requestInfo(); await sleep(500); } catch { /* very old firmware */ }
+    }
+    const chunkedText = ((this.currentInfo?.flags ?? 0) & FLAG_CHUNKED_TEXT) !== 0;
+    if (!chunkedText) {
+      const tooLong = cards.findIndex((card) => !cardFitsLegacy(card));
+      if (tooLong >= 0) {
+        throw new Error(`Card ${tooLong + 1} has more text than this glasses firmware can receive. Update the ESP32 firmware, or shorten the card to about 200 bytes.`);
+      }
+    }
+    const chunkSize = await this.imageChunkSize();
+    const textChunk = Math.max(8, chunkSize - 1);
+
     const totalSteps = 1 + cards.length + syncImages.length + 1;
     let done = 0;
     this.emitProgress(done, totalSteps, 'Preparing synchronization');
@@ -335,20 +391,22 @@ class OllOBleManager {
       this.emitProgress(done, totalSteps, 'Sending flashcards');
 
       for (let index = 0; index < cards.length; index++) {
-        await this.sendExpectStatus(makeCardPacket(cards[index], index), 0x02);
+        if (chunkedText) await this.sendChunkedCard(cards[index], index, textChunk);
+        else await this.sendExpectStatus(makeCardPacket(cards[index], index), 0x02);
         done++;
         this.emitProgress(done, totalSteps, `Sending card ${index + 1} of ${cards.length}`);
       }
 
-      const chunkSize = await this.imageChunkSize();
       for (let imageIndex = 0; imageIndex < syncImages.length; imageIndex++) {
         const image = syncImages[imageIndex];
         this.emitProgress(done, totalSteps, `Preparing image ${imageIndex + 1} of ${syncImages.length}`);
-        const beginResponse = this.waitForStatus(0x03);
-        await this.write(makeImageBeginPacket(image));
-        const beginStatus = await beginResponse;
-        if (beginStatus === 0) {
-          const bytes = new Uint8Array(image.bytes);
+        const bytes = new Uint8Array(image.bytes);
+        for (let attempt = 1; ; attempt++) {
+          const beginResponse = this.waitForStatus(0x03);
+          await this.write(makeImageBeginPacket(image));
+          const beginStatus = await beginResponse;
+          if (beginStatus === 2) break; // already stored on the glasses
+          if (beginStatus !== 0) throw new Error(this.statusDescription(0x03, beginStatus));
           let checksum = 0;
           for (let offset = 0; offset < bytes.length; offset += chunkSize) {
             const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
@@ -356,9 +414,11 @@ class OllOBleManager {
             await this.write(new Uint8Array([0x04, ...u32(offset), ...chunk]));
             if (chunkSize <= 15 && offset % (chunkSize * 16) === 0) await sleep(3);
           }
-          await this.sendExpectStatus(new Uint8Array([0x05, checksum]), 0x05);
-        } else if (beginStatus !== 2) {
-          throw new Error(this.statusDescription(0x03, beginStatus));
+          // Status 1 = the glasses saw a missing or damaged piece: send this image again (up to 3 tries).
+          const endStatus = await this.sendExpectStatus(new Uint8Array([0x05, checksum]), 0x05, [0, 1]);
+          if (endStatus === 0) break;
+          if (attempt >= 3) throw new Error(this.statusDescription(0x05, endStatus));
+          this.emitProgress(done, totalSteps, `Resending image ${imageIndex + 1} (attempt ${attempt + 1})`);
         }
         done++;
         this.emitProgress(done, totalSteps, `Transferred image ${imageIndex + 1} of ${syncImages.length}`);

@@ -1,0 +1,30 @@
+diff --git a/ollo-app/src/ble/BleManager.ts b/ollo-app/src/ble/BleManager.ts
+index cde50f9..5e8b103 100644
+--- a/ollo-app/src/ble/BleManager.ts
++++ b/ollo-app/src/ble/BleManager.ts
+@@ -128,17 +128,22 @@ class OllOBleManager {
+       if (this.isTauriDesktop()) {
+         const api = await this.getTauriApi();
+         let candidate: { address: string; rssi: number } | undefined;
++        const seen = new Map<string, string>();
+         await api.startScan((devices) => {
+           for (const device of devices) {
++            seen.set(device.address, device.name || '(no name)');
+             const hasService = device.services.some((service) => service.toLowerCase() === SERVICE_UUID);
+-            const hasName = (device.name || '').toLowerCase() === DEVICE_NAME.toLowerCase();
++            const hasName = (device.name || '').toLowerCase().includes(DEVICE_NAME.toLowerCase());
+             if ((hasService || hasName) && (!candidate || device.rssi > candidate.rssi)) {
+               candidate = { address: device.address, rssi: device.rssi };
+             }
+           }
+-        }, 10000);
++        }, 15000);
+         try { await api.stopScan(); } catch { /* scan may already have stopped */ }
+-        if (!candidate) throw new Error('No OllO glasses found. Make sure the glasses are powered on and nearby.');
++        if (!candidate) {
++          const names = [...seen.values()].slice(0, 6).join(', ');
++          throw new Error(`No OllO glasses found. Scan saw ${seen.size} Bluetooth device(s)${names ? `: ${names}` : ''}.`);
++        }
+         localStorage.setItem(SAVED_DEVICE_KEY, candidate.address);
+         await this.connectById(candidate.address);
+       } else {

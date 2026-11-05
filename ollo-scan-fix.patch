@@ -1,0 +1,34 @@
+diff --git a/ollo-app/src/ble/BleManager.ts b/ollo-app/src/ble/BleManager.ts
+index 5e8b103..729290a 100644
+--- a/ollo-app/src/ble/BleManager.ts
++++ b/ollo-app/src/ble/BleManager.ts
+@@ -29,6 +29,13 @@ type PendingStatus = { resolve: (status: number) => void; reject: (error: Error)
+ 
+ const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+ 
++// The plugin's startScan() returns immediately and scans in the background,
++// so we must wait here before calling stopScan().
++async function waitFor(done: () => boolean, timeoutMs: number): Promise<void> {
++  const end = Date.now() + timeoutMs;
++  while (!done() && Date.now() < end) await sleep(150);
++}
++
+ function dataView(bytes: Uint8Array): DataView {
+   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+ }
+@@ -103,6 +110,7 @@ class OllOBleManager {
+           const match = devices.find((device) => device.address.toLowerCase() === savedId.toLowerCase());
+           if (match) foundAddress = match.address;
+         }, 5000);
++        await waitFor(() => foundAddress !== undefined, 5000);
+         try { await api.stopScan(); } catch { /* scan may already have stopped */ }
+         if (!foundAddress) return false;
+         await this.connectById(foundAddress);
+@@ -139,6 +147,7 @@ class OllOBleManager {
+             }
+           }
+         }, 15000);
++        await waitFor(() => candidate !== undefined, 15000);
+         try { await api.stopScan(); } catch { /* scan may already have stopped */ }
+         if (!candidate) {
+           const names = [...seen.values()].slice(0, 6).join(', ');

@@ -1,0 +1,414 @@
+diff --git a/ollo-app/README.md b/ollo-app/README.md
+index 7562cc7..da70e5a 100644
+--- a/ollo-app/README.md
++++ b/ollo-app/README.md
+@@ -21,7 +21,7 @@ The Windows desktop path is included in `src-tauri/`. Tauri uses the system WebV
+ - Image conversion to formats understood by the supplied firmware:
+   - **Black & white:** 1-bit packed monochrome (format `0`).
+   - **Grayscale:** 2-bit packed grayscale, four tones (format `2`).
+-  - **Color:** RGB565 little-endian (format `1`), limited to 320 × 240 by the supplied firmware.
++  - **Color:** RGB565 little-endian (format `1`), downscaled to fit 640 × 480 (same as the other modes).
+ - BLE UUIDs and packet layout matching the supplied ESP32-S3 protocol v2.
+ - First-time device selection and saved-device reconnection attempt on application startup / foreground.
+ - Full-library synchronization using the current firmware's `BEGIN_SYNC → CARD → IMG_BEGIN/IMG_CHUNK/IMG_END → END_SYNC` flow.
+@@ -36,7 +36,7 @@ The supplied firmware protocol accepts a complete deck upload and atomically rep
+ 
+ ### Folders and ratings
+ 
+-Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 100 UTF-8 bytes per side. The app validates those limits.
++Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 255 UTF-8 bytes per side (1-byte length field). The app validates those limits.
+ 
+ The four-level difficulty rating is local to the app. The current card structure and BLE card packet do not include a rating field, so a rating is not sent to the glasses.
+ 
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index f3e388c..ff5c0a2 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -5,7 +5,8 @@ import type { Card, ImageMode, LibraryData, StoredImage } from './types';
+ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
+ import { convertImage, imageModeLabel } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+-import type { DeviceInfo, StorageInfo } from './ble/protocol';
++import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
++import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, TrashIcon } from './icons';
+ import './styles.css';
+ 
+ type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+@@ -66,6 +67,7 @@ export default function App() {
+   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0, label: 'Ready to synchronize' });
+   const [syncBusy, setSyncBusy] = useState(false);
+   const [notice, setNotice] = useState('');
++  const [viewerSrc, setViewerSrc] = useState<string | undefined>();
+   const fileInput = useRef<HTMLInputElement>(null);
+ 
+   useEffect(() => {
+@@ -110,6 +112,13 @@ export default function App() {
+     };
+   }, [library?.settings.autoReconnect]);
+ 
++  useEffect(() => {
++    if (!viewerSrc) return;
++    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setViewerSrc(undefined); };
++    window.addEventListener('keydown', onKey);
++    return () => window.removeEventListener('keydown', onKey);
++  }, [viewerSrc]);
++
+   useEffect(() => {
+     if (!notice) return;
+     const timer = window.setTimeout(() => setNotice(''), 3200);
+@@ -129,6 +138,8 @@ export default function App() {
+   const folderCards = useMemo(() => library?.cards.filter((card) => card.folder === selectedFolder) ?? [], [library, selectedFolder]);
+   const studyCards = folderCards;
+   const activeStudyCard = studyCards[studyIndex];
++  const activeStudyImageId = activeStudyCard ? (studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId) : undefined;
++  const activeStudyImage = activeStudyImageId ? images.get(activeStudyImageId) : undefined;
+   const activeEditorImageId = editorCard ? (editorSide === 'front' ? editorCard.frontImageId : editorCard.backImageId) : undefined;
+   const activeEditorImage = activeEditorImageId ? images.get(activeEditorImageId) : undefined;
+   const allImageRecords = [...images.values()];
+@@ -167,12 +178,12 @@ export default function App() {
+   function saveEditor() {
+     if (!editorCard || !library) return;
+     const folder = editorCard.folder.trim() || 'OllO';
+-    if (byteLength(folder) > 20) {
++    if (byteLength(folder) > MAX_FOLDER_BYTES) {
+       setNotice('Folder names must be 20 UTF-8 bytes or fewer.');
+       return;
+     }
+-    if (byteLength(editorCard.front) > 100 || byteLength(editorCard.back) > 100) {
+-      setNotice('Each card side must be 100 UTF-8 bytes or fewer for the current glasses protocol.');
++    if (byteLength(editorCard.front) > MAX_TEXT_BYTES || byteLength(editorCard.back) > MAX_TEXT_BYTES) {
++      setNotice(`Each card side must be ${MAX_TEXT_BYTES} bytes or fewer.`);
+       return;
+     }
+     const exists = library.cards.some((card) => card.id === editorCard.id);
+@@ -281,20 +292,24 @@ export default function App() {
+   return (
+     <main className="app-shell">
+       <header className="topbar">
+-        {screen !== 'home' ? <button className="icon-button back-button" onClick={navigateBack} aria-label="Go back">←</button> : <button className={`icon-button ${bookmarksOnly ? 'active' : ''}`} onClick={() => setBookmarksOnly((value) => !value)} aria-label="Show bookmarks">▮</button>}
+-        {screen === 'home' ? (
++        {screen !== 'home' ? <button className="icon-button back-button" onClick={navigateBack} aria-label="Go back"><ArrowLeftIcon /></button> : <button className={`icon-button big ${bookmarksOnly ? 'active' : ''}`} onClick={() => setBookmarksOnly((value) => !value)} aria-label="Show bookmarks"><BookmarkIcon /></button>}
++        {screen === 'home' && (
+           <div className="top-actions">
+             {showSearch && <input className="search-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search folders and cards" autoFocus />}
+-            <button className="icon-button" onClick={() => { setShowSearch((value) => !value); if (showSearch) setSearch(''); }} aria-label="Search">⌕</button>
++            <button className="icon-button" onClick={() => { setShowSearch((value) => !value); if (showSearch) setSearch(''); }} aria-label="Search"><SearchIcon /></button>
+             <button className="pill-button" onClick={() => setScreen('sync')}>sync</button>
+           </div>
+-        ) : (
+-          <>
+-            <div className="page-heading">{screen === 'folder' ? selectedFolder : screen === 'study' ? 'STUDY' : screen === 'editor' ? 'EDIT' : screen === 'sync' ? 'sync' : 'SETTINGS'}</div>
+-            {screen === 'folder' && <button className="pill-button" onClick={() => setScreen('sync')}>sync</button>}
+-            {screen === 'editor' && <button className="icon-button danger" onClick={deleteCurrentCard} aria-label="Delete card">▤</button>}
+-          </>
+         )}
++        {screen === 'folder' && <button className="pill-button push-right" onClick={() => setScreen('sync')}>sync</button>}
++        {screen === 'study' && activeStudyCard && (
++          <div className="top-actions">
++            <button className={`round-action ${activeStudyCard.bookmarked ? 'selected' : ''}`} onClick={() => toggleBookmark(activeStudyCard.id)} aria-label="Bookmark card"><BookmarkIcon /></button>
++            <button className="round-action" onClick={() => openEditor(activeStudyCard)} aria-label="Edit card"><PencilIcon /></button>
++          </div>
++        )}
++        {screen === 'editor' && <><div className="page-heading">EDIT</div><button className="icon-button danger plain" onClick={deleteCurrentCard} aria-label="Delete card"><TrashIcon /></button></>}
++        {screen === 'sync' && <><div className="page-heading">sync</div><span className="topbar-spacer" /></>}
++        {screen === 'settings' && <><div className="page-heading">SETTINGS</div><span className="topbar-spacer" /></>}
+       </header>
+ 
+       {screen === 'home' && (
+@@ -310,13 +325,14 @@ export default function App() {
+             })}
+           </div>
+           <div className="home-bottom-actions">
+-            <button className="floating-play" onClick={() => { if (folders.length) { setSelectedFolder(folders[0]); setStudyIndex(0); setStudyBack(false); setScreen('study'); } }} aria-label="Start studying">▶</button>
++            <button className="floating-play" onClick={() => { if (folders.length) { setSelectedFolder(folders[0]); setStudyIndex(0); setStudyBack(false); setScreen('study'); } }} aria-label="Start studying"><PlayIcon /></button>
++            <button className="settings-shortcut" onClick={() => setScreen('settings')} aria-label="Settings"><SettingsIcon /></button>
+             <button className="floating-add" onClick={() => {
+               const folder = window.prompt('Folder name for the new card', selectedFolder || 'OllO')?.trim();
+               if (!folder) return;
+-              if (byteLength(folder) > 20) { setNotice('Folder names must be 20 UTF-8 bytes or fewer.'); return; }
++              if (byteLength(folder) > MAX_FOLDER_BYTES) { setNotice('Folder names must be 20 UTF-8 bytes or fewer.'); return; }
+               startNewCard(folder);
+-            }} aria-label="Add flashcard">＋</button>
++            }} aria-label="Add flashcard"><PlusIcon /></button>
+           </div>
+         </section>
+       )}
+@@ -324,7 +340,7 @@ export default function App() {
+       {screen === 'folder' && (
+         <section className="folder-screen">
+           <div className="folder-management-card">
+-            <div className="folder-management-top"><strong>{selectedFolder}</strong><div className="row-actions"><button className="text-icon muted" onClick={renameFolder} aria-label="Rename folder">✎</button><button className="text-icon danger" onClick={deleteFolder} aria-label="Delete folder">▤</button></div></div>
++            <div className="folder-management-top"><strong>{selectedFolder}</strong><div className="row-actions"><button className="text-icon muted" onClick={renameFolder} aria-label="Rename folder"><PencilIcon /></button><button className="text-icon danger" onClick={deleteFolder} aria-label="Delete folder"><TrashIcon /></button></div></div>
+             <div className="folder-management-bottom"><span>{folderCards.length} cards</span><span className="synced-label">{library.lastSyncedAt ? 'Synced' : 'Not synced'}</span></div>
+           </div>
+           <div className="folder-card-list">
+@@ -332,18 +348,17 @@ export default function App() {
+               {card.frontImageId && images.get(card.frontImageId) ? <img src={images.get(card.frontImageId)?.preview} alt="Card front" /> : <span>{card.front || 'Untitled card'}</span>}
+             </button>)}
+           </div>
+-          <div className="home-bottom-actions"><button className="floating-play" onClick={() => { setStudyIndex(0); setStudyBack(false); setScreen('study'); }} aria-label="Study folder">▶</button><button className="floating-add" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard">＋</button></div>
++          <div className="home-bottom-actions"><button className="floating-play" onClick={() => { setStudyIndex(0); setStudyBack(false); setScreen('study'); }} aria-label="Study folder"><PlayIcon /></button><button className="floating-add" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button></div>
+         </section>
+       )}
+ 
+       {screen === 'study' && (
+         <section className="study-screen">
+           {activeStudyCard ? <>
+-            <div className="study-top-actions"><button className={`round-action ${activeStudyCard.bookmarked ? 'selected' : ''}`} onClick={() => toggleBookmark(activeStudyCard.id)} aria-label="Bookmark card">▮</button><button className="round-action" onClick={() => openEditor(activeStudyCard)} aria-label="Edit card">✎</button></div>
+-            <button className="study-card" onClick={() => setStudyBack((value) => !value)}>
+-              {((studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId) && images.get((studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId)!)) ? <img src={images.get((studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId)!)?.preview} alt="Flashcard" /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
+-            </button>
+-            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card">←</button><button onClick={() => setStudyBack((value) => !value)} aria-label="Flip card">↶</button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card">→</button></div>
++            <div className="study-card" role="button" tabIndex={0} onClick={() => setStudyBack((value) => !value)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setStudyBack((value) => !value); } }}>
++              {activeStudyImage ? <img src={activeStudyImage.preview} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(activeStudyImage.preview); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
++            </div>
++            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={() => setStudyBack((value) => !value)} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
+             <div className="difficulty-rating" aria-label="Rate difficulty to memorize this card">
+               {([1, 2, 3, 4] as const).map((rating) => <button key={rating} className={`rating-segment rating-${rating} ${activeStudyCard.rating === rating ? 'chosen' : ''}`} onClick={() => rateCard(rating)} title={['Easy', 'Moderate', 'Difficult', 'Very difficult'][rating - 1]} aria-label={`Difficulty ${rating}`} />)}
+             </div>
+@@ -355,12 +370,12 @@ export default function App() {
+ 
+       {screen === 'editor' && editorCard && (
+         <section className="editor-screen">
+-          <div className="editor-side-tabs"><button className={editorSide === 'front' ? 'selected' : ''} onClick={() => setEditorSide('front')}>FRONT</button><button className={editorSide === 'back' ? 'selected' : ''} onClick={() => setEditorSide('back')}>BACK</button></div>
++                    <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Write the question…' : 'Write the answer…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
++          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide])} / {MAX_TEXT_BYTES} bytes</div>
++          {activeEditorImage && <div className="editor-image-preview"><img src={activeEditorImage.preview} alt="Selected card image (tap to enlarge)" onClick={() => setViewerSrc(activeEditorImage.preview)} /><div><strong>{imageModeLabel(activeEditorImage.mode)}</strong><span>{activeEditorImage.width} × {activeEditorImage.height}</span><button className="text-link danger" onClick={removeEditorImage}>Remove image</button></div></div>}
++          <div className="editor-actions"><button className="soft-button" onClick={() => { setImageTarget(editorSide); setShowImagePicker(true); }}>Add image</button></div>
++          <button className="flip-editor" onClick={() => setEditorSide((value) => value === 'front' ? 'back' : 'front')} aria-label="Flip card side"><FlipIcon /></button>
+           <label className="field-label">Folder<input className="text-field compact" value={editorCard.folder} onChange={(event) => setEditorCard({ ...editorCard, folder: event.target.value })} maxLength={40} /></label>
+-          <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Write the question…' : 'Write the answer…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
+-          <div className="editor-counter">{byteLength(editorCard[editorSide])} / 100 bytes · supported by current glasses firmware</div>
+-          {activeEditorImage && <div className="editor-image-preview"><img src={activeEditorImage.preview} alt="Selected card image" /><div><strong>{imageModeLabel(activeEditorImage.mode)}</strong><span>{activeEditorImage.width} × {activeEditorImage.height}</span><button className="text-link danger" onClick={removeEditorImage}>Remove image</button></div></div>}
+-          <div className="editor-actions"><button className="soft-button" onClick={() => { setImageTarget(editorSide); setShowImagePicker(true); }}>Add image</button><button className="soft-button flip-editor" onClick={() => setEditorSide((value) => value === 'front' ? 'back' : 'front')}>↶</button></div>
+           <button className="primary-button save-button" onClick={saveEditor}>SAVE CARD</button>
+           <input ref={fileInput} type="file" accept="image/*" hidden onChange={(event) => void processSelectedImage(event.target.files?.[0])} />
+           {showImagePicker && <div className="modal-backdrop" onClick={() => setShowImagePicker(false)}><div className="image-picker-modal" onClick={(event) => event.stopPropagation()}>
+@@ -378,7 +393,7 @@ export default function App() {
+       {screen === 'sync' && (
+         <section className="sync-screen">
+           <div className="device-panel">
+-            <div className="device-heading"><div className="bluetooth-symbol">ᛒ</div><div><strong>OllO Glasses</strong><span className={connection === 'connected' ? 'device-connected' : 'device-disconnected'}>Status: {connection === 'connected' ? 'CONNECTED' : connection === 'connecting' ? 'CONNECTING' : 'DISCONNECTED'}</span></div></div>
++            <div className="device-heading"><div className="bluetooth-symbol"><BluetoothIcon /></div><div><strong>OllO Glasses</strong><span className={connection === 'connected' ? 'device-connected' : 'device-disconnected'}>Status: {connection === 'connected' ? 'CONNECTED' : connection === 'connecting' ? 'CONNECTING' : 'DISCONNECTED'}</span></div></div>
+             <p className="connection-message">{connectionMessage}</p>
+             <div className="panel-divider" />
+             <div className="storage-label"><span>FREE STORAGE</span><span>{freeBytes === undefined ? '—' : `${formatBytes(freeBytes)} / ${formatBytes(storageInfo?.totalBytes)}`}</span></div>
+@@ -409,7 +424,7 @@ export default function App() {
+         </section>
+       )}
+ 
+-      {screen === 'home' && <button className="settings-shortcut" onClick={() => setScreen('settings')} aria-label="Settings">⚙</button>}
++      {viewerSrc && <div className="image-viewer" onClick={() => setViewerSrc(undefined)} role="dialog" aria-label="Full screen image"><button className="viewer-close" onClick={() => setViewerSrc(undefined)} aria-label="Close"><CloseIcon /></button><img src={viewerSrc} alt="Full screen card" /></div>}
+       {notice && <div className="toast" role="status">{notice}</div>}
+     </main>
+   );
+diff --git a/ollo-app/src/ble/BleManager.ts b/ollo-app/src/ble/BleManager.ts
+index bf091b3..cde50f9 100644
+--- a/ollo-app/src/ble/BleManager.ts
++++ b/ollo-app/src/ble/BleManager.ts
+@@ -172,7 +172,7 @@ class OllOBleManager {
+           this.connectedDeviceId = undefined;
+           this.rejectAllPending(new Error('The glasses disconnected.'));
+           this.setState('disconnected', 'Glasses disconnected');
+-        }, { services: [SERVICE_UUID] });
++        });
+         this.connectedDeviceId = deviceId;
+         await BleClient.startNotifications(deviceId, SERVICE_UUID, NOTIFY_UUID, (value) => this.handleNotification(value));
+       }
+diff --git a/ollo-app/src/ble/protocol.ts b/ollo-app/src/ble/protocol.ts
+index 5d83c90..6b72072 100644
+--- a/ollo-app/src/ble/protocol.ts
++++ b/ollo-app/src/ble/protocol.ts
+@@ -6,6 +6,10 @@ export const WRITE_UUID = '6f6c6c6f-0002-4000-8000-00805f9b34fb';
+ export const NOTIFY_UUID = '6f6c6c6f-0003-4000-8000-00805f9b34fb';
+ export const DEVICE_NAME = 'Ollo';
+ 
++// Text lengths are sent as 1 byte on the wire, so 255 is the protocol ceiling per side.
++export const MAX_TEXT_BYTES = 255;
++export const MAX_FOLDER_BYTES = 20;
++
+ export const IMAGE_FORMAT: Record<ImageMode, number> = {
+   mono: 0,
+   rgb565: 1,
+@@ -49,9 +53,9 @@ export function makeCardPacket(card: Card, index: number): Uint8Array {
+     while (end > 0 && (source[end] & 0xc0) === 0x80) end--;
+     return source.slice(0, end);
+   };
+-  const folder = clean(card.folder || 'OllO', 20);
+-  const front = clean(card.front, 100);
+-  const back = clean(card.back, 100);
++  const folder = clean(card.folder || 'OllO', MAX_FOLDER_BYTES);
++  const front = clean(card.front, MAX_TEXT_BYTES);
++  const back = clean(card.back, MAX_TEXT_BYTES);
+   const frontImage = card.frontImageId ?? 0;
+   const backImage = card.backImageId ?? 0;
+   return new Uint8Array([
+diff --git a/ollo-app/src/icons.tsx b/ollo-app/src/icons.tsx
+new file mode 100644
+index 0000000..6268226
+--- /dev/null
++++ b/ollo-app/src/icons.tsx
+@@ -0,0 +1,36 @@
++import type { ReactNode, SVGProps } from 'react';
++
++type IconProps = SVGProps<SVGSVGElement>;
++
++function Svg({ children, ...props }: IconProps & { children: ReactNode }) {
++  return (
++    <svg
++      viewBox="0 0 24 24"
++      width="1em"
++      height="1em"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth={2.2}
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      aria-hidden="true"
++      focusable="false"
++      {...props}
++    >
++      {children}
++    </svg>
++  );
++}
++
++export const BookmarkIcon = (p: IconProps) => <Svg {...p}><path d="M6.5 3.5h11v17l-5.5-3.6-5.5 3.6z" fill="currentColor" /></Svg>;
++export const SearchIcon = (p: IconProps) => <Svg {...p}><circle cx="10.5" cy="10.5" r="6.5" /><path d="M15.5 15.5 21 21" /></Svg>;
++export const PencilIcon = (p: IconProps) => <Svg {...p} strokeWidth={0}><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" /></Svg>;
++export const TrashIcon = (p: IconProps) => <Svg {...p} strokeWidth={1.9}><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6" /></Svg>;
++export const PlayIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><circle cx="12" cy="12" r="9" /><path d="M10 8l6 4-6 4z" fill="currentColor" strokeWidth={1.2} /></Svg>;
++export const PlusIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M12 4v16M4 12h16" /></Svg>;
++export const ArrowLeftIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M20 12H5M11 5l-7 7 7 7" /></Svg>;
++export const ArrowRightIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M4 12h15M13 5l7 7-7 7" /></Svg>;
++export const FlipIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><path d="M4.5 15a7.5 7.5 0 0 1 15 0" /><path d="M16 15.5h7l-3.5 4.5z" fill="currentColor" strokeWidth={1.2} /></Svg>;
++export const BluetoothIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><path d="M6.5 7.5 17 17l-5 5V2l5 5L6.5 16.5" /></Svg>;
++export const SettingsIcon = (p: IconProps) => <Svg {...p} strokeWidth={2}><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></Svg>;
++export const CloseIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M6 6l12 12M18 6 6 18" /></Svg>;
+diff --git a/ollo-app/src/imageCodec.ts b/ollo-app/src/imageCodec.ts
+index d80af5c..8d3a620 100644
+--- a/ollo-app/src/imageCodec.ts
++++ b/ollo-app/src/imageCodec.ts
+@@ -3,7 +3,7 @@ import type { ImageMode, StoredImage } from './types';
+ const LIMITS: Record<ImageMode, { width: number; height: number }> = {
+   mono: { width: 640, height: 480 },
+   gray2: { width: 640, height: 480 },
+-  rgb565: { width: 320, height: 240 }
++  rgb565: { width: 640, height: 480 }
+ };
+ 
+ function makeId(): number {
+@@ -82,7 +82,7 @@ export async function convertImage(file: File, mode: ImageMode): Promise<StoredI
+     mode,
+     width,
+     height,
+-    bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
++    bytes: bytes.slice().buffer as ArrayBuffer,
+     preview: canvas.toDataURL('image/png'),
+     createdAt: Date.now()
+   };
+diff --git a/ollo-app/src/styles.css b/ollo-app/src/styles.css
+index 7e55e8e..7cf6f72 100644
+--- a/ollo-app/src/styles.css
++++ b/ollo-app/src/styles.css
+@@ -26,7 +26,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .topbar { min-height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 25px; }
+ .icon-button { border: 0; background: var(--cream); color: #080808; width: 54px; height: 54px; flex: 0 0 54px; border-radius: 50%; display: grid; place-items: center; font-size: 31px; line-height: 1; box-shadow: 5px 6px 0 #111; }
+ .icon-button.active { background: var(--yellow); }
+-.back-button { background: transparent; color: var(--cream); box-shadow: none; font-size: 56px; width: 56px; flex-basis: 56px; justify-content: start; }
++.back-button { background: transparent; color: var(--cream); box-shadow: none; font-size: 48px; width: 56px; flex-basis: 56px; }
++.icon-button svg, .round-action svg, .floating-play svg, .floating-add svg, .study-navigation svg, .flip-editor svg, .text-icon svg, .bluetooth-symbol svg { display: block; }
++.icon-button { font-size: 28px; }
++.icon-button.big { width: 62px; height: 62px; flex-basis: 62px; font-size: 32px; }
++.icon-button.plain { background: transparent; box-shadow: none; }
++.push-right { margin-left: auto; }
++.topbar-spacer { width: 56px; flex: 0 0 56px; }
+ .top-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; flex: 1; }
+ .pill-button { border: 0; background: var(--cream); color: #080808; padding: 11px 31px; min-width: 120px; border-radius: 999px; font-size: 20px; font-weight: 750; box-shadow: 5px 6px 0 #111; }
+ .search-input { min-width: 0; width: min(300px, 48vw); border: 1px solid #777; outline: 0; background: var(--surface); color: var(--cream); border-radius: 16px; padding: 12px 14px; }
+@@ -43,13 +49,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .folder-tile span { font-size: 19px; color: #eee; }
+ .home-bottom-actions { position: fixed; bottom: max(28px, env(safe-area-inset-bottom)); left: 0; right: 0; width: min(100% - 56px, 704px); margin: 0 auto; display: flex; justify-content: space-between; align-items: center; pointer-events: none; z-index: 5; }
+ .floating-play, .floating-add { pointer-events: auto; display: grid; place-items: center; border: 0; box-shadow: 6px 7px 0 #111; color: #050505; }
+-.floating-play { width: 66px; height: 66px; border-radius: 22px; background: var(--cream); font-size: 30px; padding-left: 5px; }
+-.floating-add { width: 72px; height: 72px; border-radius: 50%; background: var(--yellow); font-size: 53px; font-weight: 300; line-height: 1; }
++.floating-play { width: 66px; height: 66px; border-radius: 22px; background: var(--cream); font-size: 46px; }
++.floating-add { width: 72px; height: 72px; border-radius: 50%; background: var(--yellow); font-size: 46px; }
+ .folder-management-card { border: 2px solid #777; border-radius: 26px; padding: 22px 23px; background: var(--surface); margin-bottom: 34px; }
+ .folder-management-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 2px solid var(--cream); padding-bottom: 15px; }
+ .folder-management-top strong { font-size: clamp(23px, 5vw, 34px); }
+ .row-actions { display: flex; align-items: center; gap: 22px; }
+-.text-icon { border: 0; padding: 0; background: transparent; font-size: 28px; }
++.text-icon { border: 0; padding: 0; background: transparent; font-size: 30px; display: grid; place-items: center; }
+ .folder-management-bottom { display: flex; align-items: center; gap: 35px; padding-top: 19px; font-size: 19px; }
+ .synced-label { color: var(--green); }
+ .folder-card-list { display: flex; flex-direction: column; gap: 24px; padding-bottom: 35px; }
+@@ -57,12 +63,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .flashcard-preview img { display: block; max-width: 100%; max-height: 200px; object-fit: contain; }
+ .study-screen { display: flex; flex-direction: column; min-height: calc(100vh - 135px); padding-bottom: 30px; }
+ .study-top-actions { display: flex; justify-content: flex-end; gap: 17px; margin: 0 0 20px; }
+-.round-action { border: 0; border-radius: 50%; background: #777; color: var(--cream); width: 54px; height: 54px; font-size: 26px; }
++.round-action { border: 0; border-radius: 50%; background: #777; color: var(--cream); width: 54px; height: 54px; font-size: 26px; display: grid; place-items: center; }
+ .round-action.selected { background: var(--yellow); color: #111; }
+-.study-card { border: 0; width: 100%; min-height: min(57vh, 560px); flex: 1; background: var(--surface); color: var(--cream); border-radius: 25px; box-shadow: 0 12px 16px #1118; display: grid; place-items: center; padding: 35px 28px; text-align: center; font-size: clamp(23px, 5vw, 34px); line-height: 1.35; white-space: pre-wrap; }
+-.study-card img { max-width: 100%; max-height: 53vh; object-fit: contain; }
++.study-card { cursor: pointer; border: 0; width: 100%; min-height: min(57vh, 560px); flex: 1; background: var(--surface); color: var(--cream); border-radius: 25px; box-shadow: 0 12px 16px #1118; display: grid; place-items: center; padding: 35px 28px; text-align: center; font-size: clamp(23px, 5vw, 34px); line-height: 1.35; white-space: pre-wrap; }
++.study-card img { max-width: 100%; max-height: 53vh; object-fit: contain; cursor: zoom-in; border-radius: 8px; }
+ .study-navigation { display: flex; justify-content: space-between; align-items: center; padding: 30px 0 19px; }
+-.study-navigation button { border: 0; background: transparent; color: var(--cream); font-size: 56px; line-height: 1; width: 70px; height: 65px; }
++.study-navigation button { border: 0; background: transparent; color: var(--cream); font-size: 46px; line-height: 1; width: 70px; height: 65px; display: grid; place-items: center; }
+ .difficulty-rating { display: flex; justify-content: center; align-items: stretch; gap: 5px; width: min(75%, 450px); margin: 10px auto 0; position: relative; }
+ .difficulty-rating::before, .difficulty-rating::after { content: ''; position: absolute; top: -4px; bottom: -4px; width: 7px; border-radius: 5px; background: var(--cream); }
+ .difficulty-rating::before { left: -6px; }.difficulty-rating::after { right: -6px; }
+@@ -72,9 +78,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .rating-caption { text-align: center; min-height: 24px; color: #aaa; font-size: 13px; margin-top: 14px; }
+ .study-counter { text-align: center; color: #777; font-size: 13px; margin-top: 6px; }
+ .editor-screen { display: flex; flex-direction: column; gap: 16px; }
+-.editor-side-tabs { display: flex; justify-content: center; gap: 8px; }
+-.editor-side-tabs button { background: transparent; color: #999; border: 1px solid #555; padding: 9px 20px; border-radius: 999px; font-size: 13px; font-weight: 800; letter-spacing: .08em; }
+-.editor-side-tabs button.selected { background: var(--cream); color: #151515; border-color: var(--cream); }
+ .field-label { display: flex; flex-direction: column; gap: 7px; color: #aaa; font-size: 13px; }
+ .text-field, .card-editor-text, .settings-field textarea, .settings-field select { width: 100%; border: 1px solid #646464; border-radius: 15px; background: var(--surface); color: var(--cream); outline: none; padding: 13px 15px; }
+ .text-field.compact { padding: 11px 14px; }
+@@ -82,13 +85,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .card-editor-text::placeholder { color: #bbb; }
+ .editor-counter { color: #929292; font-size: 12px; text-align: right; }
+ .editor-image-preview { border-radius: 17px; padding: 12px; background: #373737; display: flex; align-items: center; gap: 15px; }
+-.editor-image-preview img { width: 90px; height: 90px; object-fit: contain; background: white; border-radius: 10px; }
++.editor-image-preview img { width: 90px; height: 90px; object-fit: contain; background: white; border-radius: 10px; cursor: zoom-in; }
+ .editor-image-preview div { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #aaa; }
+ .editor-image-preview strong { color: var(--cream); }
+ .text-link { border: 0; background: none; padding: 3px 0; text-align: left; font-size: 13px; }
+ .editor-actions { display: flex; justify-content: space-between; align-items: center; gap: 15px; }
+ .soft-button { border: 0; border-radius: 999px; background: #888; color: var(--cream); padding: 12px 22px; font-size: 17px; }
+-.flip-editor { background: transparent; font-size: 36px; }
++.flip-editor { align-self: center; border: 0; background: transparent; color: var(--cream); font-size: 54px; line-height: 1; padding: 4px 16px; display: grid; place-items: center; }
+ .primary-button { border: 0; border-radius: 15px; background: var(--green); color: #151515; font-weight: 850; padding: 14px 25px; }
+ .save-button { width: 100%; margin-top: 8px; }
+ .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: #0009; padding: 20px; }
+@@ -101,7 +104,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+ .device-panel { background: var(--surface); border-radius: 27px; padding: 23px; }
+ .device-heading { display: flex; align-items: center; gap: 17px; }
+-.bluetooth-symbol { width: 65px; height: 65px; border-radius: 18px; background: #777; color: var(--cream); display: grid; place-items: center; font-size: 38px; font-weight: 700; }
++.bluetooth-symbol { width: 65px; height: 65px; border-radius: 18px; background: #777; color: var(--cream); display: grid; place-items: center; font-size: 40px; }
+ .device-heading > div:last-child { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+ .device-heading strong { font-size: clamp(21px, 5vw, 30px); }.device-heading span { color: #aaa; font-size: clamp(13px, 3.4vw, 18px); }
+ .device-heading .device-connected { color: var(--green); }.device-heading .device-disconnected { color: #aaa; }
+@@ -125,7 +128,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .settings-card input { width: 23px; height: 23px; accent-color: var(--green); }
+ .settings-field { display: flex; flex-direction: column; gap: 8px; color: #aaa; font-size: 13px; }.settings-field textarea { min-height: 95px; resize: vertical; }.settings-field select { color: var(--cream); }
+ .forget-device { align-self: flex-start; background: #555; }.settings-footnote { margin-top: 0; }
+-.settings-shortcut { position: fixed; top: 25px; right: max(28px, calc((100vw - 704px) / 2)); border: 0; background: transparent; color: #aaa; font-size: 24px; }
++.settings-shortcut { pointer-events: auto; border: 0; background: transparent; color: #8a8a8a; font-size: 30px; width: 48px; height: 48px; display: grid; place-items: center; }
+ .empty-state { border: 1px dashed #686868; border-radius: 20px; padding: 30px 20px; color: #aaa; text-align: center; }
+ .toast { position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); width: max-content; max-width: calc(100% - 36px); z-index: 50; border-radius: 999px; background: var(--cream); color: #171717; box-shadow: 0 6px 20px #0008; padding: 12px 19px; font-size: 13px; text-align: center; }
+ .loading-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #aaa; }.loading-screen .glasses-mark { width: 130px; }
+@@ -150,3 +153,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+   .stat-tile { min-height: 120px; }
+ }
+ .firmware-hint, .mode-hint { color: #aaa; font-size: 12px; line-height: 1.45; margin: 0; }
++
++.image-viewer { position: fixed; inset: 0; z-index: 100; background: #000; display: grid; place-items: center; touch-action: pinch-zoom; }
++.image-viewer img { width: 100vw; height: 100vh; object-fit: contain; image-rendering: auto; }
++.viewer-close { position: fixed; top: max(14px, env(safe-area-inset-top)); right: 14px; z-index: 101; width: 48px; height: 48px; border: 0; border-radius: 50%; background: #000a; color: #fff; font-size: 26px; display: grid; place-items: center; }

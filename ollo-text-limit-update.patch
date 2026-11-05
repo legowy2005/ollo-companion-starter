@@ -1,0 +1,73 @@
+diff --git a/ollo-app/README.md b/ollo-app/README.md
+index da70e5a..ec2bd8f 100644
+--- a/ollo-app/README.md
++++ b/ollo-app/README.md
+@@ -36,7 +36,7 @@ The supplied firmware protocol accepts a complete deck upload and atomically rep
+ 
+ ### Folders and ratings
+ 
+-Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 255 UTF-8 bytes per side (1-byte length field). The app validates those limits.
++Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 200 UTF-8 bytes combined (one BLE write must hold the whole card). The app validates those limits.
+ 
+ The four-level difficulty rating is local to the app. The current card structure and BLE card packet do not include a rating field, so a rating is not sent to the glasses.
+ 
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index ff5c0a2..ecc4e2f 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -5,7 +5,7 @@ import type { Card, ImageMode, LibraryData, StoredImage } from './types';
+ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
+ import { convertImage, imageModeLabel } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+-import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
++import { MAX_CARD_TEXT_BYTES, MAX_FOLDER_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
+ import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, TrashIcon } from './icons';
+ import './styles.css';
+ 
+@@ -182,8 +182,8 @@ export default function App() {
+       setNotice('Folder names must be 20 UTF-8 bytes or fewer.');
+       return;
+     }
+-    if (byteLength(editorCard.front) > MAX_TEXT_BYTES || byteLength(editorCard.back) > MAX_TEXT_BYTES) {
+-      setNotice(`Each card side must be ${MAX_TEXT_BYTES} bytes or fewer.`);
++    if (byteLength(editorCard.front) + byteLength(editorCard.back) > MAX_CARD_TEXT_BYTES) {
++      setNotice(`Front and back together must be ${MAX_CARD_TEXT_BYTES} bytes or fewer.`);
+       return;
+     }
+     const exists = library.cards.some((card) => card.id === editorCard.id);
+@@ -371,7 +371,7 @@ export default function App() {
+       {screen === 'editor' && editorCard && (
+         <section className="editor-screen">
+                     <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Write the question…' : 'Write the answer…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
+-          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide])} / {MAX_TEXT_BYTES} bytes</div>
++          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide])} bytes · front + back {byteLength(editorCard.front) + byteLength(editorCard.back)} / {MAX_CARD_TEXT_BYTES}</div>
+           {activeEditorImage && <div className="editor-image-preview"><img src={activeEditorImage.preview} alt="Selected card image (tap to enlarge)" onClick={() => setViewerSrc(activeEditorImage.preview)} /><div><strong>{imageModeLabel(activeEditorImage.mode)}</strong><span>{activeEditorImage.width} × {activeEditorImage.height}</span><button className="text-link danger" onClick={removeEditorImage}>Remove image</button></div></div>}
+           <div className="editor-actions"><button className="soft-button" onClick={() => { setImageTarget(editorSide); setShowImagePicker(true); }}>Add image</button></div>
+           <button className="flip-editor" onClick={() => setEditorSide((value) => value === 'front' ? 'back' : 'front')} aria-label="Flip card side"><FlipIcon /></button>
+diff --git a/ollo-app/src/ble/protocol.ts b/ollo-app/src/ble/protocol.ts
+index 6b72072..713b918 100644
+--- a/ollo-app/src/ble/protocol.ts
++++ b/ollo-app/src/ble/protocol.ts
+@@ -6,8 +6,10 @@ export const WRITE_UUID = '6f6c6c6f-0002-4000-8000-00805f9b34fb';
+ export const NOTIFY_UUID = '6f6c6c6f-0003-4000-8000-00805f9b34fb';
+ export const DEVICE_NAME = 'Ollo';
+ 
+-// Text lengths are sent as 1 byte on the wire, so 255 is the protocol ceiling per side.
++// Firmware accepts up to 255 bytes per side, but one BLE write must fit the whole card packet
++// (14 header + 20 folder + text), so front + back together are capped at 200 bytes.
+ export const MAX_TEXT_BYTES = 255;
++export const MAX_CARD_TEXT_BYTES = 200;
+ export const MAX_FOLDER_BYTES = 20;
+ 
+ export const IMAGE_FORMAT: Record<ImageMode, number> = {
+@@ -54,8 +56,8 @@ export function makeCardPacket(card: Card, index: number): Uint8Array {
+     return source.slice(0, end);
+   };
+   const folder = clean(card.folder || 'OllO', MAX_FOLDER_BYTES);
+-  const front = clean(card.front, MAX_TEXT_BYTES);
+-  const back = clean(card.back, MAX_TEXT_BYTES);
++  const front = clean(card.front, Math.min(MAX_TEXT_BYTES, MAX_CARD_TEXT_BYTES));
++  const back = clean(card.back, Math.min(MAX_TEXT_BYTES, MAX_CARD_TEXT_BYTES - front.length));
+   const frontImage = card.frontImageId ?? 0;
+   const backImage = card.backImageId ?? 0;
+   return new Uint8Array([

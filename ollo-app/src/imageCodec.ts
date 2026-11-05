@@ -1,10 +1,9 @@
 import type { ImageMode, StoredImage } from './types';
 
-const LIMITS: Record<ImageMode, { width: number; height: number }> = {
-  mono: { width: 640, height: 480 },
-  gray2: { width: 640, height: 480 },
-  rgb565: { width: 320, height: 240 }
-};
+/** The glasses copy is never larger than this (and never upscaled). */
+export const GLASSES_MAX = { width: 640, height: 480 };
+
+export const IMAGE_MODES: ImageMode[] = ['mono', 'gray2', 'rgb565'];
 
 function makeId(): number {
   const values = new Uint32Array(1);
@@ -12,10 +11,27 @@ function makeId(): number {
   return values[0] || 1;
 }
 
-export async function convertImage(file: File, mode: ImageMode): Promise<StoredImage> {
-  const bitmap = await createImageBitmap(file);
-  const limit = LIMITS[mode];
-  const scale = Math.min(limit.width / bitmap.width, limit.height / bitmap.height, 1);
+export interface GlassesVariant {
+  mode: ImageMode;
+  width: number;
+  height: number;
+  bytes: ArrayBuffer;
+  /** PNG data URL showing how the glasses copy will look. */
+  preview: string;
+}
+
+/** A picked image, converted once for every mode so the user can compare them before choosing. */
+export interface PreparedImage {
+  file: Blob;
+  originalWidth: number;
+  originalHeight: number;
+  /** Small data URL of the original, for the comparison screen. */
+  originalPreview: string;
+  variants: Record<ImageMode, GlassesVariant>;
+}
+
+function convertVariant(bitmap: ImageBitmap, mode: ImageMode): GlassesVariant {
+  const scale = Math.min(GLASSES_MAX.width / bitmap.width, GLASSES_MAX.height / bitmap.height, 1);
   const width = Math.max(1, Math.floor(bitmap.width * scale));
   const height = Math.max(1, Math.floor(bitmap.height * scale));
   const canvas = document.createElement('canvas');
@@ -23,10 +39,10 @@ export async function convertImage(file: File, mode: ImageMode): Promise<StoredI
   canvas.height = height;
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('Could not prepare the image.');
+  context.imageSmoothingQuality = 'high';
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, width, height);
   context.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
 
   const pixels = context.getImageData(0, 0, width, height).data;
   let bytes: Uint8Array;
@@ -63,35 +79,89 @@ export async function convertImage(file: File, mode: ImageMode): Promise<StoredI
     }
   }
 
-  // Match the selected export mode in the preview as closely as possible.
-  if (mode !== 'rgb565') {
-    const preview = context.getImageData(0, 0, width, height);
-    for (let i = 0; i < preview.data.length; i += 4) {
+  // Preview = exactly what the glasses copy contains.
+  const preview = context.getImageData(0, 0, width, height);
+  for (let i = 0; i < preview.data.length; i += 4) {
+    if (mode === 'rgb565') {
+      preview.data[i] = (preview.data[i] >> 3) * 255 / 31;
+      preview.data[i + 1] = (preview.data[i + 1] >> 2) * 255 / 63;
+      preview.data[i + 2] = (preview.data[i + 2] >> 3) * 255 / 31;
+    } else {
       const gray = Math.round(0.299 * preview.data[i] + 0.587 * preview.data[i + 1] + 0.114 * preview.data[i + 2]);
       const shown = mode === 'mono' ? (gray >= 128 ? 255 : 0) : Math.round(gray / 85) * 85;
       preview.data[i] = shown;
       preview.data[i + 1] = shown;
       preview.data[i + 2] = shown;
     }
-    context.putImageData(preview, 0, 0);
   }
+  context.putImageData(preview, 0, 0);
 
-  const id = makeId();
+  return { mode, width, height, bytes: bytes.slice().buffer as ArrayBuffer, preview: canvas.toDataURL('image/png') };
+}
+
+function smallPreview(bitmap: ImageBitmap): string {
+  const scale = Math.min(640 / bitmap.width, 480 / bitmap.height, 1);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.floor(bitmap.height * scale));
+  canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.85);
+}
+
+/** Reads the picked file and builds the glasses copy for all three modes. */
+export async function prepareImage(file: File): Promise<PreparedImage> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    return {
+      file,
+      originalWidth: bitmap.width,
+      originalHeight: bitmap.height,
+      originalPreview: smallPreview(bitmap),
+      variants: {
+        mono: convertVariant(bitmap, 'mono'),
+        gray2: convertVariant(bitmap, 'gray2'),
+        rgb565: convertVariant(bitmap, 'rgb565')
+      }
+    };
+  } finally {
+    bitmap.close();
+  }
+}
+
+/** Keeps the original untouched and stores the chosen glasses copy next to it. */
+export function finalizeImage(prepared: PreparedImage, mode: ImageMode): StoredImage {
+  const variant = prepared.variants[mode];
   return {
-    id,
+    id: makeId(),
     mode,
-    width,
-    height,
-    bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-    preview: canvas.toDataURL('image/png'),
-    createdAt: Date.now()
+    width: variant.width,
+    height: variant.height,
+    bytes: variant.bytes,
+    preview: variant.preview,
+    createdAt: Date.now(),
+    originalBlob: prepared.file,
+    originalWidth: prepared.originalWidth,
+    originalHeight: prepared.originalHeight
   };
+}
+
+const urlCache = new WeakMap<Blob, string>();
+
+/** What the app itself shows: the original picture when we have it, otherwise the glasses copy. */
+export function displaySrc(image: StoredImage): string {
+  if (!image.originalBlob) return image.preview;
+  let url = urlCache.get(image.originalBlob);
+  if (!url) {
+    url = URL.createObjectURL(image.originalBlob);
+    urlCache.set(image.originalBlob, url);
+  }
+  return url;
 }
 
 export function imageModeLabel(mode: ImageMode): string {
   if (mode === 'mono') return 'Black & white';
   if (mode === 'gray2') return 'Grayscale · 4 tones';
-  return 'Color · RGB565';
+  return 'Color';
 }
 
 export function expectedImageBytes(width: number, height: number, mode: ImageMode): number {

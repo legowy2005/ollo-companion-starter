@@ -21,7 +21,7 @@ The Windows desktop path is included in `src-tauri/`. Tauri uses the system WebV
 - Image conversion to formats understood by the supplied firmware:
   - **Black & white:** 1-bit packed monochrome (format `0`).
   - **Grayscale:** 2-bit packed grayscale, four tones (format `2`).
-  - **Color:** RGB565 little-endian (format `1`), limited to 320 × 240 by the supplied firmware.
+  - **Color:** RGB565 little-endian (format `1`), downscaled to fit 640 × 480 (same as the other modes).
 - BLE UUIDs and packet layout matching the supplied ESP32-S3 protocol v2.
 - First-time device selection and saved-device reconnection attempt on application startup / foreground.
 - Full-library synchronization using the current firmware's `BEGIN_SYNC → CARD → IMG_BEGIN/IMG_CHUNK/IMG_END → END_SYNC` flow.
@@ -36,13 +36,13 @@ The supplied firmware protocol accepts a complete deck upload and atomically rep
 
 ### Folders and ratings
 
-Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 100 UTF-8 bytes per side. The app validates those limits.
+Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card text to 8,192 UTF-8 bytes per side when the firmware reports chunked-text support (older firmware: about 200 bytes combined). The app validates those limits.
 
 The four-level difficulty rating is local to the app. The current card structure and BLE card packet do not include a rating field, so a rating is not sent to the glasses.
 
 ### Image mode reality
 
-The firmware receives and stores all three encodings. Its current display path converts RGB565 to a dithered monochrome/gray framebuffer before it reaches the RP2040 display. Therefore selecting **Color** sends/stores RGB565, but does not guarantee true-colour rendering on the glasses. That requires a separate firmware/display-pipeline change.
+The firmware receives and stores all three encodings. The app keeps your original picture for its own use and sends a second, glasses-sized copy (at most 640 × 480, never enlarged) in the mode you choose.
 
 The firmware's grayscale format is `IMAGE_FORMAT_GRAY2`: **2 bits per pixel / four grayscale tones**. It is not 4-bit grayscale.
 

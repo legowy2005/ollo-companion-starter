@@ -1,0 +1,626 @@
+diff --git a/ollo-app/README.md b/ollo-app/README.md
+index ec2bd8f..a93613c 100644
+--- a/ollo-app/README.md
++++ b/ollo-app/README.md
+@@ -36,13 +36,13 @@ The supplied firmware protocol accepts a complete deck upload and atomically rep
+ 
+ ### Folders and ratings
+ 
+-Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card front/back text to 200 UTF-8 bytes combined (one BLE write must hold the whole card). The app validates those limits.
++Folders are encoded as a folder name on every card; the firmware has no separate folder object. The firmware limits folder names to 20 UTF-8 bytes, and card text to 8,192 UTF-8 bytes per side when the firmware reports chunked-text support (older firmware: about 200 bytes combined). The app validates those limits.
+ 
+ The four-level difficulty rating is local to the app. The current card structure and BLE card packet do not include a rating field, so a rating is not sent to the glasses.
+ 
+ ### Image mode reality
+ 
+-The firmware receives and stores all three encodings. Its current display path converts RGB565 to a dithered monochrome/gray framebuffer before it reaches the RP2040 display. Therefore selecting **Color** sends/stores RGB565, but does not guarantee true-colour rendering on the glasses. That requires a separate firmware/display-pipeline change.
++The firmware receives and stores all three encodings. The app keeps your original picture for its own use and sends a second, glasses-sized copy (at most 640 × 480, never enlarged) in the mode you choose.
+ 
+ The firmware's grayscale format is `IMAGE_FORMAT_GRAY2`: **2 bits per pixel / four grayscale tones**. It is not 4-bit grayscale.
+ 
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index ecc4e2f..e8d4bfe 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -3,9 +3,9 @@ import { App as CapacitorApp } from '@capacitor/app';
+ import { Capacitor } from '@capacitor/core';
+ import type { Card, ImageMode, LibraryData, StoredImage } from './types';
+ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
+-import { convertImage, imageModeLabel } from './imageCodec';
++import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+-import { MAX_CARD_TEXT_BYTES, MAX_FOLDER_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
++import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
+ import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, TrashIcon } from './icons';
+ import './styles.css';
+ 
+@@ -60,6 +60,8 @@ export default function App() {
+   const [imageMode, setImageMode] = useState<ImageMode>('gray2');
+   const [imageTarget, setImageTarget] = useState<CardSide>('front');
+   const [showImagePicker, setShowImagePicker] = useState(false);
++  const [pendingImage, setPendingImage] = useState<PreparedImage | undefined>();
++  const [pickerBusy, setPickerBusy] = useState(false);
+   const [connection, setConnection] = useState<ConnectionState>(bleManager.state);
+   const [connectionMessage, setConnectionMessage] = useState('Not connected');
+   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | undefined>(bleManager.info);
+@@ -182,8 +184,8 @@ export default function App() {
+       setNotice('Folder names must be 20 UTF-8 bytes or fewer.');
+       return;
+     }
+-    if (byteLength(editorCard.front) + byteLength(editorCard.back) > MAX_CARD_TEXT_BYTES) {
+-      setNotice(`Front and back together must be ${MAX_CARD_TEXT_BYTES} bytes or fewer.`);
++    if (byteLength(editorCard.front) > MAX_TEXT_BYTES || byteLength(editorCard.back) > MAX_TEXT_BYTES) {
++      setNotice(`Each card side must be ${MAX_TEXT_BYTES.toLocaleString()} bytes or fewer.`);
+       return;
+     }
+     const exists = library.cards.some((card) => card.id === editorCard.id);
+@@ -230,22 +232,42 @@ export default function App() {
+     updateLibrary((previous) => ({ ...previous, cards: previous.cards.map((card) => card.id === activeStudyCard.id ? { ...card, rating } : card) }));
+   }
+ 
++  function closeImagePicker() {
++    setShowImagePicker(false);
++    setPendingImage(undefined);
++    setPickerBusy(false);
++    if (fileInput.current) fileInput.current.value = '';
++  }
++
++  // Step 1: read the picked file and build the glasses copy for every mode, so they can be compared.
+   async function processSelectedImage(file?: File) {
+-    if (!file || !editorCard) return;
++    if (!file) return;
++    setPickerBusy(true);
++    try {
++      setPendingImage(await prepareImage(file));
++    } catch (error) {
++      setNotice(error instanceof Error ? error.message : 'Could not read this image.');
++    } finally {
++      setPickerBusy(false);
++      if (fileInput.current) fileInput.current.value = '';
++    }
++  }
++
++  // Step 2: keep the original untouched and store the chosen glasses copy next to it.
++  async function confirmPendingImage() {
++    if (!pendingImage || !editorCard) return;
+     try {
+-      const converted = await convertImage(file, imageMode);
+-      await saveImage(converted);
+-      setImages((previous) => new Map(previous).set(converted.id, converted));
++      const stored = finalizeImage(pendingImage, imageMode);
++      await saveImage(stored);
++      setImages((previous) => new Map(previous).set(stored.id, stored));
+       setEditorCard((previous) => previous ? {
+         ...previous,
+-        [imageTarget === 'front' ? 'frontImageId' : 'backImageId']: converted.id
++        [imageTarget === 'front' ? 'frontImageId' : 'backImageId']: stored.id
+       } : previous);
+-      setShowImagePicker(false);
+       setNotice(`${imageModeLabel(imageMode)} image added`);
++      closeImagePicker();
+     } catch (error) {
+-      setNotice(error instanceof Error ? error.message : 'Image conversion failed.');
+-    } finally {
+-      if (fileInput.current) fileInput.current.value = '';
++      setNotice(error instanceof Error ? error.message : 'Could not save the image.');
+     }
+   }
+ 
+@@ -345,7 +367,7 @@ export default function App() {
+           </div>
+           <div className="folder-card-list">
+             {folderCards.map((card) => <button className="flashcard-preview" key={card.id} onClick={() => { setSelectedCardId(card.id); setStudyIndex(folderCards.findIndex((item) => item.id === card.id)); setStudyBack(false); setScreen('study'); }}>
+-              {card.frontImageId && images.get(card.frontImageId) ? <img src={images.get(card.frontImageId)?.preview} alt="Card front" /> : <span>{card.front || 'Untitled card'}</span>}
++              {card.frontImageId && images.get(card.frontImageId) ? <img src={displaySrc(images.get(card.frontImageId)!)} alt="Card front" /> : <span>{card.front || 'Untitled card'}</span>}
+             </button>)}
+           </div>
+           <div className="home-bottom-actions"><button className="floating-play" onClick={() => { setStudyIndex(0); setStudyBack(false); setScreen('study'); }} aria-label="Study folder"><PlayIcon /></button><button className="floating-add" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button></div>
+@@ -356,7 +378,7 @@ export default function App() {
+         <section className="study-screen">
+           {activeStudyCard ? <>
+             <div className="study-card" role="button" tabIndex={0} onClick={() => setStudyBack((value) => !value)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setStudyBack((value) => !value); } }}>
+-              {activeStudyImage ? <img src={activeStudyImage.preview} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(activeStudyImage.preview); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
++              {activeStudyImage ? <img src={displaySrc(activeStudyImage)} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(displaySrc(activeStudyImage)); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
+             </div>
+             <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={() => setStudyBack((value) => !value)} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
+             <div className="difficulty-rating" aria-label="Rate difficulty to memorize this card">
+@@ -371,21 +393,33 @@ export default function App() {
+       {screen === 'editor' && editorCard && (
+         <section className="editor-screen">
+                     <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Write the question…' : 'Write the answer…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
+-          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide])} bytes · front + back {byteLength(editorCard.front) + byteLength(editorCard.back)} / {MAX_CARD_TEXT_BYTES}</div>
+-          {activeEditorImage && <div className="editor-image-preview"><img src={activeEditorImage.preview} alt="Selected card image (tap to enlarge)" onClick={() => setViewerSrc(activeEditorImage.preview)} /><div><strong>{imageModeLabel(activeEditorImage.mode)}</strong><span>{activeEditorImage.width} × {activeEditorImage.height}</span><button className="text-link danger" onClick={removeEditorImage}>Remove image</button></div></div>}
++          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide]).toLocaleString()} bytes</div>
++          {activeEditorImage && <div className="editor-image-preview"><img src={displaySrc(activeEditorImage)} alt="Selected card image (tap to enlarge)" onClick={() => setViewerSrc(displaySrc(activeEditorImage))} /><div><strong>{imageModeLabel(activeEditorImage.mode)} on glasses</strong><span>Glasses copy {activeEditorImage.width} × {activeEditorImage.height}</span>{activeEditorImage.originalWidth && <span>Original {activeEditorImage.originalWidth} × {activeEditorImage.originalHeight}</span>}<button className="text-link danger" onClick={removeEditorImage}>Remove image</button></div></div>}
+           <div className="editor-actions"><button className="soft-button" onClick={() => { setImageTarget(editorSide); setShowImagePicker(true); }}>Add image</button></div>
+           <button className="flip-editor" onClick={() => setEditorSide((value) => value === 'front' ? 'back' : 'front')} aria-label="Flip card side"><FlipIcon /></button>
+           <label className="field-label">Folder<input className="text-field compact" value={editorCard.folder} onChange={(event) => setEditorCard({ ...editorCard, folder: event.target.value })} maxLength={40} /></label>
+           <button className="primary-button save-button" onClick={saveEditor}>SAVE CARD</button>
+           <input ref={fileInput} type="file" accept="image/*" hidden onChange={(event) => void processSelectedImage(event.target.files?.[0])} />
+-          {showImagePicker && <div className="modal-backdrop" onClick={() => setShowImagePicker(false)}><div className="image-picker-modal" onClick={(event) => event.stopPropagation()}>
++          {showImagePicker && <div className="modal-backdrop" onClick={closeImagePicker}><div className="image-picker-modal" onClick={(event) => event.stopPropagation()}>
+             <div className="modal-title">Add image</div>
+-            <p>Choose how OllO should encode this image.</p>
+-            <div className="mode-options">
+-              {(['mono', 'gray2', 'rgb565'] as ImageMode[]).map((mode) => <button key={mode} className={imageMode === mode ? 'mode-option selected' : 'mode-option'} onClick={() => setImageMode(mode)}><span className={`mode-dot ${mode}`} /><span>{imageModeLabel(mode)}</span>{imageMode === mode && <b>✓</b>}</button>)}
+-            </div>
+-            <p className="mode-hint">Grayscale is four-tone (2-bit). RGB565 is stored in color format, but the current glasses renderer converts it to a dithered monochrome display.</p>
+-            <div className="modal-actions"><button className="soft-button" onClick={() => setShowImagePicker(false)}>Cancel</button><button className="primary-button" onClick={() => fileInput.current?.click()}>Choose image</button></div>
++            {!pendingImage ? <>
++              <p>Pick a picture. You can compare black & white, grayscale and color before choosing.</p>
++              <div className="modal-actions"><button className="soft-button" onClick={closeImagePicker}>Cancel</button><button className="primary-button" disabled={pickerBusy} onClick={() => fileInput.current?.click()}>{pickerBusy ? 'Preparing…' : 'Choose image'}</button></div>
++            </> : <>
++              <p>Tap a style to choose it. Your original stays untouched in the app; the glasses get the version you pick.</p>
++              <div className="mode-previews">
++                {IMAGE_MODES.map((mode) => {
++                  const variant = pendingImage.variants[mode];
++                  return <button key={mode} className={imageMode === mode ? 'mode-preview selected' : 'mode-preview'} onClick={() => setImageMode(mode)}>
++                    <img src={variant.preview} alt={imageModeLabel(mode)} />
++                    <span className="mode-preview-name">{imageModeLabel(mode)}</span>
++                    <span className="mode-preview-size">{variant.width} × {variant.height}</span>
++                  </button>;
++                })}
++              </div>
++              <p className="mode-hint">Original: {pendingImage.originalWidth} × {pendingImage.originalHeight}. Pictures larger than 640 × 480 are shrunk for the glasses only.</p>
++              <div className="modal-actions"><button className="soft-button" onClick={() => setPendingImage(undefined)}>Back</button><button className="primary-button" onClick={() => void confirmPendingImage()}>Use this style</button></div>
++            </>}
+           </div></div>}
+         </section>
+       )}
+@@ -418,7 +452,7 @@ export default function App() {
+         <section className="settings-screen">
+           <div className="settings-card"><div><strong>Automatic reconnection</strong><span>Reconnect to your saved glasses when OllO opens.</span></div><input type="checkbox" checked={library.settings.autoReconnect} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, autoReconnect: event.target.checked } }))} /></div>
+           <label className="settings-field"><span>Motivational quote</span><textarea value={library.settings.motivationalQuote} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, motivationalQuote: event.target.value } }))} /></label>
+-          <label className="settings-field"><span>Default image mode</span><select value={library.settings.defaultImageMode} onChange={(event) => { const mode = event.target.value as ImageMode; setImageMode(mode); updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, defaultImageMode: mode } })); }}><option value="mono">Black & white</option><option value="gray2">Grayscale · 4 tones</option><option value="rgb565">Color · RGB565</option></select></label>
++          <label className="settings-field"><span>Default image mode</span><select value={library.settings.defaultImageMode} onChange={(event) => { const mode = event.target.value as ImageMode; setImageMode(mode); updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, defaultImageMode: mode } })); }}><option value="mono">Black & white</option><option value="gray2">Grayscale · 4 tones</option><option value="rgb565">Color</option></select></label>
+           <button className="soft-button forget-device" onClick={() => { bleManager.forgetDevice(); setNotice('Saved glasses forgotten.'); }}>Forget saved glasses</button>
+           <p className="settings-footnote">OllO does not currently include firmware update controls.</p>
+         </section>
+diff --git a/ollo-app/src/ble/BleManager.ts b/ollo-app/src/ble/BleManager.ts
+index 729290a..de51366 100644
+--- a/ollo-app/src/ble/BleManager.ts
++++ b/ollo-app/src/ble/BleManager.ts
+@@ -4,10 +4,13 @@ import { BleClient } from '@capacitor-community/bluetooth-le';
+ import type { Card, StoredImage } from '../types';
+ import {
+   DEVICE_NAME,
++  FLAG_CHUNKED_TEXT,
+   NOTIFY_UUID,
+   SERVICE_UUID,
+   WRITE_UUID,
++  cardFitsLegacy,
+   makeCardPacket,
++  makeChunkedCard,
+   makeImageBeginPacket,
+   parseDeviceInfo,
+   parseStorage,
+@@ -319,12 +322,37 @@ class OllOBleManager {
+       const mtu = this.isTauriDesktop()
+         ? await (await this.getTauriApi()).getMtu()
+         : await BleClient.getMtu(this.connectedDeviceId);
+-      return Math.max(15, Math.min(239, mtu - 8, 255));
++      return Math.max(15, Math.min(mtu - 8, 506));
+     } catch {
+       return 15;
+     }
+   }
+ 
++  /**
++   * Sends one card as CARD_BEGIN + CARD_TEXT pieces + CARD_END. Only CARD_END is answered, after the
++   * glasses have checked the lengths and checksum. Status 1 means a piece was missing or damaged,
++   * so the whole card is simply sent again (up to 3 tries).
++   */
++  private async sendChunkedCard(card: Card, index: number, textChunk: number): Promise<void> {
++    const packets = makeChunkedCard(card, index, textChunk);
++    for (let attempt = 1; ; attempt++) {
++      const response = this.waitForStatus(0x02);
++      void response.catch(() => undefined);
++      try {
++        await this.write(packets.begin);
++        for (const text of packets.texts) await this.write(text);
++        await this.write(packets.end);
++      } catch (error) {
++        this.rejectStatusWaiter(0x02, error instanceof Error ? error : new Error(String(error)));
++        throw error;
++      }
++      const status = await response;
++      if (status === 0) return;
++      if (status !== 1 || attempt >= 3) throw new Error(this.statusDescription(0x02, status));
++      await sleep(50);
++    }
++  }
++
+   async synchronize(cards: Card[], images: StoredImage[]): Promise<void> {
+     if (!this.connectedDeviceId) throw new Error('Connect to OllO before synchronizing.');
+     if (cards.length > 65535) throw new Error('The current glasses protocol supports up to 65,535 cards.');
+@@ -340,6 +368,20 @@ class OllOBleManager {
+       return image;
+     });
+ 
++    // Find out what this firmware supports before touching anything on the glasses.
++    if (!this.currentInfo) {
++      try { await this.requestInfo(); await sleep(500); } catch { /* very old firmware */ }
++    }
++    const chunkedText = ((this.currentInfo?.flags ?? 0) & FLAG_CHUNKED_TEXT) !== 0;
++    if (!chunkedText) {
++      const tooLong = cards.findIndex((card) => !cardFitsLegacy(card));
++      if (tooLong >= 0) {
++        throw new Error(`Card ${tooLong + 1} has more text than this glasses firmware can receive. Update the ESP32 firmware, or shorten the card to about 200 bytes.`);
++      }
++    }
++    const chunkSize = await this.imageChunkSize();
++    const textChunk = Math.max(8, chunkSize - 1);
++
+     const totalSteps = 1 + cards.length + syncImages.length + 1;
+     let done = 0;
+     this.emitProgress(done, totalSteps, 'Preparing synchronization');
+@@ -349,20 +391,22 @@ class OllOBleManager {
+       this.emitProgress(done, totalSteps, 'Sending flashcards');
+ 
+       for (let index = 0; index < cards.length; index++) {
+-        await this.sendExpectStatus(makeCardPacket(cards[index], index), 0x02);
++        if (chunkedText) await this.sendChunkedCard(cards[index], index, textChunk);
++        else await this.sendExpectStatus(makeCardPacket(cards[index], index), 0x02);
+         done++;
+         this.emitProgress(done, totalSteps, `Sending card ${index + 1} of ${cards.length}`);
+       }
+ 
+-      const chunkSize = await this.imageChunkSize();
+       for (let imageIndex = 0; imageIndex < syncImages.length; imageIndex++) {
+         const image = syncImages[imageIndex];
+         this.emitProgress(done, totalSteps, `Preparing image ${imageIndex + 1} of ${syncImages.length}`);
+-        const beginResponse = this.waitForStatus(0x03);
+-        await this.write(makeImageBeginPacket(image));
+-        const beginStatus = await beginResponse;
+-        if (beginStatus === 0) {
+-          const bytes = new Uint8Array(image.bytes);
++        const bytes = new Uint8Array(image.bytes);
++        for (let attempt = 1; ; attempt++) {
++          const beginResponse = this.waitForStatus(0x03);
++          await this.write(makeImageBeginPacket(image));
++          const beginStatus = await beginResponse;
++          if (beginStatus === 2) break; // already stored on the glasses
++          if (beginStatus !== 0) throw new Error(this.statusDescription(0x03, beginStatus));
+           let checksum = 0;
+           for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+             const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+@@ -370,9 +414,11 @@ class OllOBleManager {
+             await this.write(new Uint8Array([0x04, ...u32(offset), ...chunk]));
+             if (chunkSize <= 15 && offset % (chunkSize * 16) === 0) await sleep(3);
+           }
+-          await this.sendExpectStatus(new Uint8Array([0x05, checksum]), 0x05);
+-        } else if (beginStatus !== 2) {
+-          throw new Error(this.statusDescription(0x03, beginStatus));
++          // Status 1 = the glasses saw a missing or damaged piece: send this image again (up to 3 tries).
++          const endStatus = await this.sendExpectStatus(new Uint8Array([0x05, checksum]), 0x05, [0, 1]);
++          if (endStatus === 0) break;
++          if (attempt >= 3) throw new Error(this.statusDescription(0x05, endStatus));
++          this.emitProgress(done, totalSteps, `Resending image ${imageIndex + 1} (attempt ${attempt + 1})`);
+         }
+         done++;
+         this.emitProgress(done, totalSteps, `Transferred image ${imageIndex + 1} of ${syncImages.length}`);
+diff --git a/ollo-app/src/ble/protocol.ts b/ollo-app/src/ble/protocol.ts
+index 713b918..b0c1e8f 100644
+--- a/ollo-app/src/ble/protocol.ts
++++ b/ollo-app/src/ble/protocol.ts
+@@ -6,12 +6,16 @@ export const WRITE_UUID = '6f6c6c6f-0002-4000-8000-00805f9b34fb';
+ export const NOTIFY_UUID = '6f6c6c6f-0003-4000-8000-00805f9b34fb';
+ export const DEVICE_NAME = 'Ollo';
+ 
+-// Firmware accepts up to 255 bytes per side, but one BLE write must fit the whole card packet
+-// (14 header + 20 folder + text), so front + back together are capped at 200 bytes.
+-export const MAX_TEXT_BYTES = 255;
+-export const MAX_CARD_TEXT_BYTES = 200;
++// Card text. Newer firmware (flag below) receives text in chunks, so the only limit is this
++// generous per-side cap. Older firmware takes the whole card in one BLE write, which fits
++// roughly 200 bytes of front + back combined.
++export const MAX_TEXT_BYTES = 8192;
++export const LEGACY_CARD_TEXT_BYTES = 200;
+ export const MAX_FOLDER_BYTES = 20;
+ 
++/** DeviceInfo.flags bit 2: firmware understands CARD_BEGIN / CARD_TEXT / CARD_END. */
++export const FLAG_CHUNKED_TEXT = 0x04;
++
+ export const IMAGE_FORMAT: Record<ImageMode, number> = {
+   mono: 0,
+   rgb565: 1,
+@@ -45,19 +49,41 @@ export function readU32(view: DataView, offset: number): number {
+   return view.getUint32(offset, true);
+ }
+ 
++const encoder = new TextEncoder();
++
++function clampUtf8(source: Uint8Array, maxBytes: number): Uint8Array {
++  if (source.length <= maxBytes) return source;
++  let end = maxBytes;
++  while (end > 0 && (source[end] & 0xc0) === 0x80) end--;
++  return source.slice(0, end);
++}
++
++/** Folder names: one line, no control characters. */
++function cleanFolder(value: string): Uint8Array {
++  return clampUtf8(encoder.encode((value || 'OllO').replace(/[\t\r\n]/g, ' ')), MAX_FOLDER_BYTES);
++}
++
++/** Card text for chunked sync: keeps line breaks, drops carriage returns, tabs become spaces. */
++function cleanText(value: string, maxBytes: number): Uint8Array {
++  return clampUtf8(encoder.encode(value.replace(/\r/g, '').replace(/\t/g, ' ')), maxBytes);
++}
++
++export function cardTextBytes(card: Card): { front: number; back: number } {
++  return { front: encoder.encode(card.front).length, back: encoder.encode(card.back).length };
++}
++
++/** True when the card fits the old single-packet format. */
++export function cardFitsLegacy(card: Card): boolean {
++  const { front, back } = cardTextBytes(card);
++  return front + back <= LEGACY_CARD_TEXT_BYTES;
++}
++
++/** Old single-packet card, for firmware without chunked text. Line breaks become spaces. */
+ export function makeCardPacket(card: Card, index: number): Uint8Array {
+-  const encoder = new TextEncoder();
+-  const clean = (value: string, maxBytes: number) => {
+-    const sanitized = value.replace(/[\t\r\n]/g, ' ');
+-    const source = encoder.encode(sanitized);
+-    if (source.length <= maxBytes) return source;
+-    let end = maxBytes;
+-    while (end > 0 && (source[end] & 0xc0) === 0x80) end--;
+-    return source.slice(0, end);
+-  };
++  const clean = (value: string, maxBytes: number) => clampUtf8(encoder.encode(value.replace(/[\t\r\n]/g, ' ')), maxBytes);
+   const folder = clean(card.folder || 'OllO', MAX_FOLDER_BYTES);
+-  const front = clean(card.front, Math.min(MAX_TEXT_BYTES, MAX_CARD_TEXT_BYTES));
+-  const back = clean(card.back, Math.min(MAX_TEXT_BYTES, MAX_CARD_TEXT_BYTES - front.length));
++  const front = clean(card.front, LEGACY_CARD_TEXT_BYTES);
++  const back = clean(card.back, LEGACY_CARD_TEXT_BYTES - front.length);
+   const frontImage = card.frontImageId ?? 0;
+   const backImage = card.backImageId ?? 0;
+   return new Uint8Array([
+@@ -74,6 +100,48 @@ export function makeCardPacket(card: Card, index: number): Uint8Array {
+   ]);
+ }
+ 
++export interface ChunkedCard {
++  begin: Uint8Array;
++  texts: Uint8Array[];
++  end: Uint8Array;
++}
++
++/**
++ * Chunked card, in three kinds of packet:
++ *   CARD_BEGIN 0x09  [index u16][frontImg u32][backImg u32][folderLen u8][frontLen u16][backLen u16][folder]
++ *   CARD_TEXT  0x0A  [index u16][side u8 0=front 1=back][offset u16][bytes...]
++ *   CARD_END   0x0B  [index u16][checksum u8]   checksum = sum of all front + back bytes, modulo 256
++ * Only CARD_END is answered (status 0x02), so the glasses can check lengths and checksum first.
++ * `textChunk` is the number of text bytes allowed per CARD_TEXT packet.
++ */
++export function makeChunkedCard(card: Card, index: number, textChunk: number): ChunkedCard {
++  const folder = cleanFolder(card.folder);
++  const front = cleanText(card.front, MAX_TEXT_BYTES);
++  const back = cleanText(card.back, MAX_TEXT_BYTES);
++  const begin = new Uint8Array([
++    0x09,
++    ...u16(index),
++    ...u32(card.frontImageId ?? 0),
++    ...u32(card.backImageId ?? 0),
++    folder.length,
++    ...u16(front.length),
++    ...u16(back.length),
++    ...folder
++  ]);
++  const texts: Uint8Array[] = [];
++  let checksum = 0;
++  const pushSide = (side: number, data: Uint8Array) => {
++    for (let offset = 0; offset < data.length; offset += textChunk) {
++      const part = data.subarray(offset, Math.min(offset + textChunk, data.length));
++      for (const byte of part) checksum = (checksum + byte) & 0xff;
++      texts.push(new Uint8Array([0x0a, ...u16(index), side, ...u16(offset), ...part]));
++    }
++  };
++  pushSide(0, front);
++  pushSide(1, back);
++  return { begin, texts, end: new Uint8Array([0x0b, ...u16(index), checksum]) };
++}
++
+ export function makeImageBeginPacket(image: StoredImage): Uint8Array {
+   const mode = IMAGE_FORMAT[image.mode];
+   const dataLength = image.bytes.byteLength;
+diff --git a/ollo-app/src/imageCodec.ts b/ollo-app/src/imageCodec.ts
+index 8d3a620..0fd8a32 100644
+--- a/ollo-app/src/imageCodec.ts
++++ b/ollo-app/src/imageCodec.ts
+@@ -1,10 +1,9 @@
+ import type { ImageMode, StoredImage } from './types';
+ 
+-const LIMITS: Record<ImageMode, { width: number; height: number }> = {
+-  mono: { width: 640, height: 480 },
+-  gray2: { width: 640, height: 480 },
+-  rgb565: { width: 640, height: 480 }
+-};
++/** The glasses copy is never larger than this (and never upscaled). */
++export const GLASSES_MAX = { width: 640, height: 480 };
++
++export const IMAGE_MODES: ImageMode[] = ['mono', 'gray2', 'rgb565'];
+ 
+ function makeId(): number {
+   const values = new Uint32Array(1);
+@@ -12,10 +11,27 @@ function makeId(): number {
+   return values[0] || 1;
+ }
+ 
+-export async function convertImage(file: File, mode: ImageMode): Promise<StoredImage> {
+-  const bitmap = await createImageBitmap(file);
+-  const limit = LIMITS[mode];
+-  const scale = Math.min(limit.width / bitmap.width, limit.height / bitmap.height, 1);
++export interface GlassesVariant {
++  mode: ImageMode;
++  width: number;
++  height: number;
++  bytes: ArrayBuffer;
++  /** PNG data URL showing how the glasses copy will look. */
++  preview: string;
++}
++
++/** A picked image, converted once for every mode so the user can compare them before choosing. */
++export interface PreparedImage {
++  file: Blob;
++  originalWidth: number;
++  originalHeight: number;
++  /** Small data URL of the original, for the comparison screen. */
++  originalPreview: string;
++  variants: Record<ImageMode, GlassesVariant>;
++}
++
++function convertVariant(bitmap: ImageBitmap, mode: ImageMode): GlassesVariant {
++  const scale = Math.min(GLASSES_MAX.width / bitmap.width, GLASSES_MAX.height / bitmap.height, 1);
+   const width = Math.max(1, Math.floor(bitmap.width * scale));
+   const height = Math.max(1, Math.floor(bitmap.height * scale));
+   const canvas = document.createElement('canvas');
+@@ -23,10 +39,10 @@ export async function convertImage(file: File, mode: ImageMode): Promise<StoredI
+   canvas.height = height;
+   const context = canvas.getContext('2d', { willReadFrequently: true });
+   if (!context) throw new Error('Could not prepare the image.');
++  context.imageSmoothingQuality = 'high';
+   context.fillStyle = '#ffffff';
+   context.fillRect(0, 0, width, height);
+   context.drawImage(bitmap, 0, 0, width, height);
+-  bitmap.close();
+ 
+   const pixels = context.getImageData(0, 0, width, height).data;
+   let bytes: Uint8Array;
+@@ -63,35 +79,89 @@ export async function convertImage(file: File, mode: ImageMode): Promise<StoredI
+     }
+   }
+ 
+-  // Match the selected export mode in the preview as closely as possible.
+-  if (mode !== 'rgb565') {
+-    const preview = context.getImageData(0, 0, width, height);
+-    for (let i = 0; i < preview.data.length; i += 4) {
++  // Preview = exactly what the glasses copy contains.
++  const preview = context.getImageData(0, 0, width, height);
++  for (let i = 0; i < preview.data.length; i += 4) {
++    if (mode === 'rgb565') {
++      preview.data[i] = (preview.data[i] >> 3) * 255 / 31;
++      preview.data[i + 1] = (preview.data[i + 1] >> 2) * 255 / 63;
++      preview.data[i + 2] = (preview.data[i + 2] >> 3) * 255 / 31;
++    } else {
+       const gray = Math.round(0.299 * preview.data[i] + 0.587 * preview.data[i + 1] + 0.114 * preview.data[i + 2]);
+       const shown = mode === 'mono' ? (gray >= 128 ? 255 : 0) : Math.round(gray / 85) * 85;
+       preview.data[i] = shown;
+       preview.data[i + 1] = shown;
+       preview.data[i + 2] = shown;
+     }
+-    context.putImageData(preview, 0, 0);
+   }
++  context.putImageData(preview, 0, 0);
++
++  return { mode, width, height, bytes: bytes.slice().buffer as ArrayBuffer, preview: canvas.toDataURL('image/png') };
++}
++
++function smallPreview(bitmap: ImageBitmap): string {
++  const scale = Math.min(640 / bitmap.width, 480 / bitmap.height, 1);
++  const canvas = document.createElement('canvas');
++  canvas.width = Math.max(1, Math.floor(bitmap.width * scale));
++  canvas.height = Math.max(1, Math.floor(bitmap.height * scale));
++  canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
++  return canvas.toDataURL('image/jpeg', 0.85);
++}
++
++/** Reads the picked file and builds the glasses copy for all three modes. */
++export async function prepareImage(file: File): Promise<PreparedImage> {
++  const bitmap = await createImageBitmap(file);
++  try {
++    return {
++      file,
++      originalWidth: bitmap.width,
++      originalHeight: bitmap.height,
++      originalPreview: smallPreview(bitmap),
++      variants: {
++        mono: convertVariant(bitmap, 'mono'),
++        gray2: convertVariant(bitmap, 'gray2'),
++        rgb565: convertVariant(bitmap, 'rgb565')
++      }
++    };
++  } finally {
++    bitmap.close();
++  }
++}
+ 
+-  const id = makeId();
++/** Keeps the original untouched and stores the chosen glasses copy next to it. */
++export function finalizeImage(prepared: PreparedImage, mode: ImageMode): StoredImage {
++  const variant = prepared.variants[mode];
+   return {
+-    id,
++    id: makeId(),
+     mode,
+-    width,
+-    height,
+-    bytes: bytes.slice().buffer as ArrayBuffer,
+-    preview: canvas.toDataURL('image/png'),
+-    createdAt: Date.now()
++    width: variant.width,
++    height: variant.height,
++    bytes: variant.bytes,
++    preview: variant.preview,
++    createdAt: Date.now(),
++    originalBlob: prepared.file,
++    originalWidth: prepared.originalWidth,
++    originalHeight: prepared.originalHeight
+   };
+ }
+ 
++const urlCache = new WeakMap<Blob, string>();
++
++/** What the app itself shows: the original picture when we have it, otherwise the glasses copy. */
++export function displaySrc(image: StoredImage): string {
++  if (!image.originalBlob) return image.preview;
++  let url = urlCache.get(image.originalBlob);
++  if (!url) {
++    url = URL.createObjectURL(image.originalBlob);
++    urlCache.set(image.originalBlob, url);
++  }
++  return url;
++}
++
+ export function imageModeLabel(mode: ImageMode): string {
+   if (mode === 'mono') return 'Black & white';
+   if (mode === 'gray2') return 'Grayscale · 4 tones';
+-  return 'Color · RGB565';
++  return 'Color';
+ }
+ 
+ export function expectedImageBytes(width: number, height: number, mode: ImageMode): number {
+diff --git a/ollo-app/src/styles.css b/ollo-app/src/styles.css
+index 7cf6f72..ef5473f 100644
+--- a/ollo-app/src/styles.css
++++ b/ollo-app/src/styles.css
+@@ -157,3 +157,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .image-viewer { position: fixed; inset: 0; z-index: 100; background: #000; display: grid; place-items: center; touch-action: pinch-zoom; }
+ .image-viewer img { width: 100vw; height: 100vh; object-fit: contain; image-rendering: auto; }
+ .viewer-close { position: fixed; top: max(14px, env(safe-area-inset-top)); right: 14px; z-index: 101; width: 48px; height: 48px; border: 0; border-radius: 50%; background: #000a; color: #fff; font-size: 26px; display: grid; place-items: center; }
++
++.mode-previews { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0 10px; }
++.mode-preview { display: flex; flex-direction: column; gap: 6px; align-items: center; border: 2px solid #555; border-radius: 14px; padding: 8px; background: #414141; color: var(--cream); }
++.mode-preview.selected { border-color: var(--green); background: #465640; }
++.mode-preview img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #000; border-radius: 8px; image-rendering: auto; }
++.mode-preview-name { font-size: 12px; font-weight: 700; text-align: center; }
++.mode-preview-size { font-size: 11px; color: #aaa; }
++.primary-button:disabled { opacity: 0.6; }
++.editor-image-preview > div { display: flex; flex-direction: column; gap: 2px; }
+diff --git a/ollo-app/src/types.ts b/ollo-app/src/types.ts
+index 6988a5a..6aee4f7 100644
+--- a/ollo-app/src/types.ts
++++ b/ollo-app/src/types.ts
+@@ -20,6 +20,10 @@ export interface StoredImage {
+   bytes: ArrayBuffer;
+   preview: string;
+   createdAt: number;
++  /** The untouched file the user picked. Shown inside the app; never sent to the glasses. */
++  originalBlob?: Blob;
++  originalWidth?: number;
++  originalHeight?: number;
+ }
+ 
+ export interface AppSettings {

@@ -20,6 +20,10 @@ export interface StoredImage {
   bytes: ArrayBuffer;
   preview: string;
   createdAt: number;
+  /** The untouched file the user picked. Shown inside the app; never sent to the glasses. */
+  originalBlob?: Blob;
+  originalWidth?: number;
+  originalHeight?: number;
 }
 
 export interface AppSettings {
