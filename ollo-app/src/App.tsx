@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
-import type { Card, ImageMode, LibraryData, StoredImage } from './types';
+import type { Card, ImageMode, LibraryData, Mood, Quote, QuoteEmotion, StoredImage } from './types';
 import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
 import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
 import { bleManager } from './ble/BleManager';
 import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
 import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon } from './icons';
+import { Mascot } from './mascot/Mascot';
+import { FloatyText } from './mascot/FloatyText';
+import { MOOD_LABELS, moodFromUrl, recordPracticeStats } from './mascot/mood';
+import { DIRECTOR_RULES, eggDisplay, handleAppOpen, quoteDisplay, resolveQuoteOfTheDay, type Display } from './mascot/director';
 import './styles.css';
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
@@ -28,20 +32,6 @@ function formatBytes(bytes?: number): string {
 
 function folderNames(cards: Card[]): string[] {
   return [...new Set(cards.map((card) => card.folder.trim() || 'OllO'))].sort((a, b) => a.localeCompare(b));
-}
-
-function GlassesMark() {
-  return (
-    <svg className="glasses-mark" viewBox="0 0 150 65" role="img" aria-label="OllO glasses">
-      <g fill="none" stroke="currentColor" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M5 12h53v36a9 9 0 0 1-9 9H14a9 9 0 0 1-9-9z" />
-        <path d="M92 12h53v36a9 9 0 0 1-9 9h-35a9 9 0 0 1-9-9z" />
-        <path d="M58 23h34" />
-      </g>
-      <circle cx="31" cy="38" r="6" fill="currentColor" />
-      <circle cx="119" cy="38" r="6" fill="currentColor" />
-    </svg>
-  );
 }
 
 function shuffled<T>(items: T[]): T[] {
@@ -84,6 +74,17 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [viewerSrc, setViewerSrc] = useState<string | undefined>();
   const fileInput = useRef<HTMLInputElement>(null);
+  // What the yellow quote spot shows right now (quote of the day, one of ollo's own lines, or the Easter egg).
+  const [display, setDisplay] = useState<Display | null>(null);
+  const libraryRef = useRef<LibraryData | null>(null);
+  const screenRef = useRef(screen);
+  const previousScreen = useRef(screen);
+  const studiedSinceDisplay = useRef(false);
+  const pendingOpenDisplay = useRef<Display | null>(null);
+  const menuVisits = useRef<number[]>([]);
+  const hiddenAt = useRef<number | null>(null);
+  const [newQuoteText, setNewQuoteText] = useState('');
+  const [newQuoteEmotion, setNewQuoteEmotion] = useState<QuoteEmotion>('auto');
 
   useEffect(() => {
     let mounted = true;
@@ -91,7 +92,11 @@ export default function App() {
       const loaded = await loadLibrary();
       const storedImages = await getAllImages();
       if (!mounted) return;
-      setLibrary(loaded);
+      // Every app open: ollo decides whether to speak, show the quote of the day, or fire the Easter egg.
+      const opened = handleAppOpen(loaded, Date.now());
+      void saveLibrary(opened.library);
+      setLibrary(opened.library);
+      setDisplay(opened.display);
       setImages(new Map(storedImages.map((image) => [image.id, image])));
       setImageMode(loaded.settings.defaultImageMode);
     })();
@@ -140,6 +145,60 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  // Coming back to the main menu.
+  useEffect(() => {
+    const came = previousScreen.current !== 'home' && screen === 'home';
+    previousScreen.current = screen;
+    const current = libraryRef.current;
+    if (!came || !current) return;
+    const now = Date.now();
+
+    menuVisits.current = [...menuVisits.current.filter((t) => now - t < DIRECTOR_RULES.eggMenuWindowMs), now];
+    const eggReady = menuVisits.current.length >= DIRECTOR_RULES.eggMenuVisits;
+
+    if (eggReady) {
+      // Easter egg: hopping in and out of the menu to find ollo's other emotions.
+      menuVisits.current = menuVisits.current.slice(-(DIRECTOR_RULES.eggMenuVisits - 1));
+      pendingOpenDisplay.current = null;
+      studiedSinceDisplay.current = false;
+      setDisplay(eggDisplay());
+      updateLibrary((previous) => ({ ...previous, meta: { ...previous.meta, lastEggAt: now } }));
+    } else if (studiedSinceDisplay.current) {
+      // The user just studied: back to the quote of the day.
+      studiedSinceDisplay.current = false;
+      pendingOpenDisplay.current = null;
+      const qotd = resolveQuoteOfTheDay(current, now);
+      setDisplay(quoteDisplay(current, qotd, now));
+      if (qotd.slot !== current.quoteOfTheDay?.slot || qotd.quoteId !== current.quoteOfTheDay?.quoteId) {
+        updateLibrary((previous) => ({ ...previous, quoteOfTheDay: qotd }));
+      }
+    } else if (pendingOpenDisplay.current) {
+      setDisplay(pendingOpenDisplay.current);
+      pendingOpenDisplay.current = null;
+    }
+  }, [screen]);
+
+  // Coming back to the app from the background counts as opening it again.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') { hiddenAt.current = Date.now(); return; }
+      const away = hiddenAt.current ? Date.now() - hiddenAt.current : 0;
+      hiddenAt.current = null;
+      const current = libraryRef.current;
+      if (!current || away < 5000) return;
+      const opened = handleAppOpen(current, Date.now());
+      updateLibrary(() => opened.library);
+      if (screenRef.current === 'home' && !studiedSinceDisplay.current) setDisplay(opened.display);
+      else pendingOpenDisplay.current = opened.display;
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  libraryRef.current = library;
+  screenRef.current = screen;
+  // ollo's face follows whatever is on screen. ?mood=angry in the URL forces a face for testing.
+  const mood: Mood = moodFromUrl() ?? display?.emotion ?? 'neutral';
   const folders = useMemo(() => library ? folderNames(library.cards) : [], [library]);
   const homeFolders = useMemo(() => {
     if (!library) return [];
@@ -293,8 +352,37 @@ export default function App() {
     if (editorCard?.id === cardId) setEditorCard((previous) => previous ? { ...previous, bookmarked: !previous.bookmarked } : previous);
   }
 
+  /** Counts a card as practiced (each card counts once per day) so ollo can react to it. */
+  function recordPractice(cardId: string) {
+    studiedSinceDisplay.current = true;
+    updateLibrary((previous) => ({ ...previous, practice: recordPracticeStats(previous.practice, cardId) }));
+  }
+
+  function flipStudyCard() {
+    if (activeStudyCard && !studyBack) recordPractice(activeStudyCard.id);
+    setStudyBack((value) => !value);
+  }
+
+  function addCustomQuote() {
+    const text = newQuoteText.trim();
+    if (!text) return;
+    const quote: Quote = { id: crypto.randomUUID(), text, emotion: newQuoteEmotion };
+    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: [...previous.settings.customQuotes, quote] } }));
+    setNewQuoteText('');
+    setNotice('Quote added. It can show up as the quote of the day.');
+  }
+
+  function updateCustomQuote(id: string, patch: Partial<Quote>) {
+    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: previous.settings.customQuotes.map((quote) => quote.id === id ? { ...quote, ...patch } : quote) } }));
+  }
+
+  function deleteCustomQuote(id: string) {
+    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: previous.settings.customQuotes.filter((quote) => quote.id !== id) } }));
+  }
+
   function rateCard(rating: 1 | 2 | 3 | 4) {
     if (!activeStudyCard) return;
+    recordPractice(activeStudyCard.id);
     updateLibrary((previous) => ({ ...previous, cards: previous.cards.map((card) => card.id === activeStudyCard.id ? { ...card, rating } : card) }));
   }
 
@@ -376,7 +464,7 @@ export default function App() {
     else setScreen('home');
   }
 
-  if (!library) return <main className="loading-screen"><GlassesMark /><p>Preparing OllO…</p></main>;
+  if (!library) return <main className="loading-screen"><Mascot mood="neutral" /><p>Preparing OllO…</p></main>;
 
   return (
     <main className="app-shell">
@@ -404,8 +492,8 @@ export default function App() {
       {screen === 'home' && (
         <section className="home-screen">
           <div className="motivation-row">
-            <div className="quote">{library.settings.motivationalQuote}</div>
-            <GlassesMark />
+            <div className={`quote ${display && display.text.length > 44 ? 'long' : ''}`}><FloatyText key={display?.id} text={display?.text ?? ''} /></div>
+            <Mascot mood={mood} />
           </div>
           <div className="folder-list">
             {homeFolders.length === 0 ? <div className="empty-state">No folders yet. Add your first flashcard.</div> : homeFolders.map((folder) => {
@@ -444,10 +532,10 @@ export default function App() {
       {screen === 'study' && (
         <section className="study-screen">
           {activeStudyCard ? <>
-            <div className="study-card" role="button" tabIndex={0} onClick={() => setStudyBack((value) => !value)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setStudyBack((value) => !value); } }}>
+            <div className="study-card" role="button" tabIndex={0} onClick={flipStudyCard} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); flipStudyCard(); } }}>
               {activeStudyImage ? <img src={displaySrc(activeStudyImage)} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(displaySrc(activeStudyImage)); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
             </div>
-            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={() => setStudyBack((value) => !value)} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
+            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={flipStudyCard} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
             <div className="difficulty-rating" aria-label="Rate difficulty to memorize this card">
               {([1, 2, 3, 4] as const).map((rating) => <button key={rating} className={`rating-segment rating-${rating} ${activeStudyCard.rating === rating ? 'chosen' : ''}`} onClick={() => rateCard(rating)} title={['Easy', 'Moderate', 'Difficult', 'Very difficult'][rating - 1]} aria-label={`Difficulty ${rating}`} />)}
             </div>
@@ -518,7 +606,32 @@ export default function App() {
       {screen === 'settings' && (
         <section className="settings-screen">
           <div className="settings-card"><div><strong>Automatic reconnection</strong><span>Reconnect to your saved glasses when OllO opens.</span></div><input type="checkbox" checked={library.settings.autoReconnect} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, autoReconnect: event.target.checked } }))} /></div>
-          <label className="settings-field"><span>Motivational quote</span><textarea value={library.settings.motivationalQuote} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, motivationalQuote: event.target.value } }))} /></label>
+          <div className="settings-card"><div><strong>Built-in quotes</strong><span>Mix OllO's own motivational quotes into the quote of the day.</span></div><input type="checkbox" checked={library.settings.useBuiltInQuotes} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, useBuiltInQuotes: event.target.checked } }))} /></div>
+          <div className="quote-editor">
+            <div className="quote-editor-title">Motivational quotes</div>
+            <p className="mode-hint">The quote of the day changes every 12 hours. Add your own and pick the face OllO makes while it is showing.</p>
+            <textarea className="text-field" value={newQuoteText} maxLength={100} placeholder="Write your own motivational quote…" onChange={(event) => setNewQuoteText(event.target.value)} />
+            <div className="quote-editor-row">
+              <label className="quote-emotion-label">OllO's face
+                <select className="text-field compact" value={newQuoteEmotion} onChange={(event) => setNewQuoteEmotion(event.target.value as QuoteEmotion)}>
+                  <option value="auto">Auto (follows my progress)</option>
+                  {(Object.keys(MOOD_LABELS) as Mood[]).map((m) => <option key={m} value={m}>{MOOD_LABELS[m]}</option>)}
+                </select>
+              </label>
+              <Mascot mood={newQuoteEmotion === 'auto' ? 'happy' : newQuoteEmotion} pop={false} className="mascot-preview" label="Preview of OllO's face" />
+            </div>
+            <button className="primary-button" disabled={!newQuoteText.trim()} onClick={addCustomQuote}>ADD QUOTE</button>
+            {library.settings.customQuotes.length > 0 && <div className="custom-quote-list">
+              {library.settings.customQuotes.map((quote) => <div className="custom-quote" key={quote.id}>
+                <span className="custom-quote-text">{quote.text}</span>
+                <select className="custom-quote-emotion" value={quote.emotion} aria-label="OllO's face for this quote" onChange={(event) => updateCustomQuote(quote.id, { emotion: event.target.value as QuoteEmotion })}>
+                  <option value="auto">Auto</option>
+                  {(Object.keys(MOOD_LABELS) as Mood[]).map((m) => <option key={m} value={m}>{MOOD_LABELS[m]}</option>)}
+                </select>
+                <button className="text-icon danger" onClick={() => deleteCustomQuote(quote.id)} aria-label="Delete quote"><TrashIcon /></button>
+              </div>)}
+            </div>}
+          </div>
           <label className="settings-field"><span>Default image mode</span><select value={library.settings.defaultImageMode} onChange={(event) => { const mode = event.target.value as ImageMode; setImageMode(mode); updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, defaultImageMode: mode } })); }}><option value="mono">Black & white</option><option value="gray2">Grayscale · 4 tones</option><option value="rgb565">Color</option></select></label>
           <button className="soft-button forget-device" onClick={() => { bleManager.forgetDevice(); setNotice('Saved glasses forgotten.'); }}>Forget saved glasses</button>
           <p className="settings-footnote">OllO does not currently include firmware update controls.</p>

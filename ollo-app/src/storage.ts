@@ -22,7 +22,15 @@ function database(): Promise<IDBPDatabase<OllODatabase>> {
 export async function loadLibrary(): Promise<LibraryData> {
   const db = await database();
   const existing = await db.get('library', 'main');
-  if (existing) return { ...existing, settings: { ...DEFAULT_SETTINGS, ...existing.settings } };
+  if (existing) {
+    const settings = { ...DEFAULT_SETTINGS, ...existing.settings };
+    // Older versions had a single editable quote. Keep it as one of the user's own quotes if they changed it.
+    const legacy = existing.settings.motivationalQuote?.trim();
+    if (!existing.settings.customQuotes && legacy && legacy !== DEFAULT_SETTINGS.motivationalQuote) {
+      settings.customQuotes = [{ id: crypto.randomUUID(), text: legacy, emotion: 'auto' }];
+    }
+    return { ...existing, settings };
+  }
   const initial: LibraryData = { cards: DEMO_CARDS, settings: DEFAULT_SETTINGS };
   await db.put('library', initial, 'main');
   return initial;

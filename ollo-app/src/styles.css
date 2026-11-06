@@ -42,7 +42,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .home-screen, .folder-screen, .study-screen, .editor-screen, .sync-screen, .settings-screen { position: relative; min-height: calc(100vh - 145px); padding-bottom: 105px; }
 .motivation-row { min-height: 225px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 0 25px; }
 .quote { flex: 1; color: var(--yellow); font-family: "Trebuchet MS", ui-monospace, monospace; font-size: clamp(20px, 4vw, 31px); letter-spacing: .05em; line-height: 1.42; transform: rotate(-2deg); max-width: 430px; }
-.glasses-mark { width: clamp(90px, 23vw, 170px); color: var(--cream); flex: 0 0 auto; transform: rotate(6deg); }
 .folder-list { display: flex; flex-direction: column; gap: 22px; padding-bottom: 70px; }
 .folder-tile { border: 0; text-align: left; background: var(--surface); color: white; width: 100%; min-height: 98px; border-radius: 25px; box-shadow: 0 12px 15px #10101070; padding: 18px 24px; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
 .folder-tile strong { font-size: 24px; }
@@ -131,7 +130,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .settings-shortcut { pointer-events: auto; border: 0; background: transparent; color: #8a8a8a; font-size: 30px; width: 48px; height: 48px; display: grid; place-items: center; }
 .empty-state { border: 1px dashed #686868; border-radius: 20px; padding: 30px 20px; color: #aaa; text-align: center; }
 .toast { position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); width: max-content; max-width: calc(100% - 36px); z-index: 50; border-radius: 999px; background: var(--cream); color: #171717; box-shadow: 0 6px 20px #0008; padding: 12px 19px; font-size: 13px; text-align: center; }
-.loading-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #aaa; }.loading-screen .glasses-mark { width: 130px; }
+.loading-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #aaa; }.loading-screen .ollo-mascot { width: 170px; }
 
 @media (min-width: 760px) {
   .app-shell { padding-top: 28px; }
@@ -174,3 +173,18 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .play-option strong { display: block; font-size: 17px; }
 .play-option small { display: block; margin-top: 3px; color: #aaa; font-size: 13px; }
 .play-option-icon { display: grid; place-items: center; flex: 0 0 52px; height: 52px; border-radius: 16px; background: var(--cream); color: #050505; font-size: 32px; }
+
+/* Quote editor (settings) */
+.quote.long { font-size: clamp(16px, 3.3vw, 24px); }
+.quote-editor { background: var(--surface); border-radius: 18px; padding: 17px; display: flex; flex-direction: column; gap: 12px; }
+.quote-editor-title { font-weight: 800; font-size: 17px; }
+.quote-editor textarea.text-field { min-height: 78px; resize: vertical; }
+.quote-editor-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.quote-emotion-label { display: flex; flex-direction: column; gap: 7px; flex: 1; color: #aaa; font-size: 13px; }
+.quote-emotion-label select { width: 100%; }
+.mascot-preview { width: 120px; flex: 0 0 120px; }
+.custom-quote-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.custom-quote { display: flex; align-items: center; gap: 10px; background: #373737; border-radius: 14px; padding: 10px 12px; }
+.custom-quote-text { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.custom-quote-emotion { border: 1px solid #646464; border-radius: 10px; background: var(--surface); color: var(--cream); padding: 6px 8px; font-size: 12px; }
+.custom-quote .text-icon { font-size: 24px; color: var(--red); }

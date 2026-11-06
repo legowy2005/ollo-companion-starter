@@ -1,0 +1,777 @@
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index 4ba6944..d9dac60 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useMemo, useRef, useState } from 'react';
+ import { App as CapacitorApp } from '@capacitor/app';
+ import { Capacitor } from '@capacitor/core';
+-import type { Card, ImageMode, LibraryData, StoredImage } from './types';
++import type { Card, ImageMode, LibraryData, Mood, Quote, QuoteEmotion, StoredImage } from './types';
+ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
+ import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+@@ -9,7 +9,8 @@ import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } f
+ import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon } from './icons';
+ import { Mascot } from './mascot/Mascot';
+ import { FloatyText } from './mascot/FloatyText';
+-import { moodFromPractice, moodFromUrl, recordPracticeStats } from './mascot/mood';
++import { MOOD_LABELS, moodFromUrl, recordPracticeStats } from './mascot/mood';
++import { DIRECTOR_RULES, eggDisplay, handleAppOpen, quoteDisplay, resolveQuoteOfTheDay, type Display } from './mascot/director';
+ import './styles.css';
+ 
+ type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+@@ -73,7 +74,17 @@ export default function App() {
+   const [notice, setNotice] = useState('');
+   const [viewerSrc, setViewerSrc] = useState<string | undefined>();
+   const fileInput = useRef<HTMLInputElement>(null);
+-  const practicedIds = useRef<Set<string>>(new Set());
++  // What the yellow quote spot shows right now (quote of the day, one of ollo's own lines, or the Easter egg).
++  const [display, setDisplay] = useState<Display | null>(null);
++  const libraryRef = useRef<LibraryData | null>(null);
++  const screenRef = useRef(screen);
++  const previousScreen = useRef(screen);
++  const studiedSinceDisplay = useRef(false);
++  const pendingOpenDisplay = useRef<Display | null>(null);
++  const menuVisits = useRef<number[]>([]);
++  const hiddenAt = useRef<number | null>(null);
++  const [newQuoteText, setNewQuoteText] = useState('');
++  const [newQuoteEmotion, setNewQuoteEmotion] = useState<QuoteEmotion>('auto');
+ 
+   useEffect(() => {
+     let mounted = true;
+@@ -81,7 +92,11 @@ export default function App() {
+       const loaded = await loadLibrary();
+       const storedImages = await getAllImages();
+       if (!mounted) return;
+-      setLibrary(loaded);
++      // Every app open: ollo decides whether to speak, show the quote of the day, or fire the Easter egg.
++      const opened = handleAppOpen(loaded, Date.now());
++      void saveLibrary(opened.library);
++      setLibrary(opened.library);
++      setDisplay(opened.display);
+       setImages(new Map(storedImages.map((image) => [image.id, image])));
+       setImageMode(loaded.settings.defaultImageMode);
+     })();
+@@ -130,8 +145,60 @@ export default function App() {
+     return () => window.clearTimeout(timer);
+   }, [notice]);
+ 
+-  // ollo's mood is re-evaluated every time the main menu is shown (and whenever practice changes).
+-  const mood = useMemo(() => moodFromUrl() ?? moodFromPractice(library?.practice), [screen, library?.practice]);
++  // Coming back to the main menu.
++  useEffect(() => {
++    const came = previousScreen.current !== 'home' && screen === 'home';
++    previousScreen.current = screen;
++    const current = libraryRef.current;
++    if (!came || !current) return;
++    const now = Date.now();
++
++    menuVisits.current = [...menuVisits.current.filter((t) => now - t < DIRECTOR_RULES.eggMenuWindowMs), now];
++    const eggReady = menuVisits.current.length >= DIRECTOR_RULES.eggMenuVisits;
++
++    if (eggReady) {
++      // Easter egg: hopping in and out of the menu to find ollo's other emotions.
++      menuVisits.current = menuVisits.current.slice(-(DIRECTOR_RULES.eggMenuVisits - 1));
++      pendingOpenDisplay.current = null;
++      studiedSinceDisplay.current = false;
++      setDisplay(eggDisplay());
++      updateLibrary((previous) => ({ ...previous, meta: { ...previous.meta, lastEggAt: now } }));
++    } else if (studiedSinceDisplay.current) {
++      // The user just studied: back to the quote of the day.
++      studiedSinceDisplay.current = false;
++      pendingOpenDisplay.current = null;
++      const qotd = resolveQuoteOfTheDay(current, now);
++      setDisplay(quoteDisplay(current, qotd, now));
++      if (qotd.slot !== current.quoteOfTheDay?.slot || qotd.quoteId !== current.quoteOfTheDay?.quoteId) {
++        updateLibrary((previous) => ({ ...previous, quoteOfTheDay: qotd }));
++      }
++    } else if (pendingOpenDisplay.current) {
++      setDisplay(pendingOpenDisplay.current);
++      pendingOpenDisplay.current = null;
++    }
++  }, [screen]);
++
++  // Coming back to the app from the background counts as opening it again.
++  useEffect(() => {
++    const onVisibility = () => {
++      if (document.visibilityState === 'hidden') { hiddenAt.current = Date.now(); return; }
++      const away = hiddenAt.current ? Date.now() - hiddenAt.current : 0;
++      hiddenAt.current = null;
++      const current = libraryRef.current;
++      if (!current || away < 5000) return;
++      const opened = handleAppOpen(current, Date.now());
++      updateLibrary(() => opened.library);
++      if (screenRef.current === 'home' && !studiedSinceDisplay.current) setDisplay(opened.display);
++      else pendingOpenDisplay.current = opened.display;
++    };
++    document.addEventListener('visibilitychange', onVisibility);
++    return () => document.removeEventListener('visibilitychange', onVisibility);
++  }, []);
++
++  libraryRef.current = library;
++  screenRef.current = screen;
++  // ollo's face follows whatever is on screen. ?mood=angry in the URL forces a face for testing.
++  const mood: Mood = moodFromUrl() ?? display?.emotion ?? 'neutral';
+   const folders = useMemo(() => library ? folderNames(library.cards) : [], [library]);
+   const homeFolders = useMemo(() => {
+     if (!library) return [];
+@@ -285,11 +352,10 @@ export default function App() {
+     if (editorCard?.id === cardId) setEditorCard((previous) => previous ? { ...previous, bookmarked: !previous.bookmarked } : previous);
+   }
+ 
+-  /** Counts a card as practiced (once per card per app run) so ollo can be happy about it. */
++  /** Counts a card as practiced (each card counts once per day) so ollo can react to it. */
+   function recordPractice(cardId: string) {
+-    if (practicedIds.current.has(cardId)) return;
+-    practicedIds.current.add(cardId);
+-    updateLibrary((previous) => ({ ...previous, practice: recordPracticeStats(previous.practice) }));
++    studiedSinceDisplay.current = true;
++    updateLibrary((previous) => ({ ...previous, practice: recordPracticeStats(previous.practice, cardId) }));
+   }
+ 
+   function flipStudyCard() {
+@@ -297,6 +363,23 @@ export default function App() {
+     setStudyBack((value) => !value);
+   }
+ 
++  function addCustomQuote() {
++    const text = newQuoteText.trim();
++    if (!text) return;
++    const quote: Quote = { id: crypto.randomUUID(), text, emotion: newQuoteEmotion };
++    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: [...previous.settings.customQuotes, quote] } }));
++    setNewQuoteText('');
++    setNotice('Quote added. It can show up as the quote of the day.');
++  }
++
++  function updateCustomQuote(id: string, patch: Partial<Quote>) {
++    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: previous.settings.customQuotes.map((quote) => quote.id === id ? { ...quote, ...patch } : quote) } }));
++  }
++
++  function deleteCustomQuote(id: string) {
++    updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, customQuotes: previous.settings.customQuotes.filter((quote) => quote.id !== id) } }));
++  }
++
+   function rateCard(rating: 1 | 2 | 3 | 4) {
+     if (!activeStudyCard) return;
+     recordPractice(activeStudyCard.id);
+@@ -409,8 +492,8 @@ export default function App() {
+       {screen === 'home' && (
+         <section className="home-screen">
+           <div className="motivation-row">
+-            <div className="quote"><FloatyText text={library.settings.motivationalQuote} /></div>
+-            <Mascot key={screen} mood={mood} />
++            <div className={`quote ${display && display.text.length > 44 ? 'long' : ''}`}><FloatyText key={display?.id} text={display?.text ?? ''} /></div>
++            <Mascot mood={mood} />
+           </div>
+           <div className="folder-list">
+             {homeFolders.length === 0 ? <div className="empty-state">No folders yet. Add your first flashcard.</div> : homeFolders.map((folder) => {
+@@ -523,7 +606,32 @@ export default function App() {
+       {screen === 'settings' && (
+         <section className="settings-screen">
+           <div className="settings-card"><div><strong>Automatic reconnection</strong><span>Reconnect to your saved glasses when OllO opens.</span></div><input type="checkbox" checked={library.settings.autoReconnect} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, autoReconnect: event.target.checked } }))} /></div>
+-          <label className="settings-field"><span>Motivational quote</span><textarea value={library.settings.motivationalQuote} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, motivationalQuote: event.target.value } }))} /></label>
++          <div className="settings-card"><div><strong>Built-in quotes</strong><span>Mix OllO's own motivational quotes into the quote of the day.</span></div><input type="checkbox" checked={library.settings.useBuiltInQuotes} onChange={(event) => updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, useBuiltInQuotes: event.target.checked } }))} /></div>
++          <div className="quote-editor">
++            <div className="quote-editor-title">Motivational quotes</div>
++            <p className="mode-hint">The quote of the day changes every 12 hours. Add your own and pick the face OllO makes while it is showing.</p>
++            <textarea className="text-field" value={newQuoteText} maxLength={100} placeholder="Write your own motivational quote…" onChange={(event) => setNewQuoteText(event.target.value)} />
++            <div className="quote-editor-row">
++              <label className="quote-emotion-label">OllO's face
++                <select className="text-field compact" value={newQuoteEmotion} onChange={(event) => setNewQuoteEmotion(event.target.value as QuoteEmotion)}>
++                  <option value="auto">Auto (follows my progress)</option>
++                  {(Object.keys(MOOD_LABELS) as Mood[]).map((m) => <option key={m} value={m}>{MOOD_LABELS[m]}</option>)}
++                </select>
++              </label>
++              <Mascot mood={newQuoteEmotion === 'auto' ? 'happy' : newQuoteEmotion} pop={false} className="mascot-preview" label="Preview of OllO's face" />
++            </div>
++            <button className="primary-button" disabled={!newQuoteText.trim()} onClick={addCustomQuote}>ADD QUOTE</button>
++            {library.settings.customQuotes.length > 0 && <div className="custom-quote-list">
++              {library.settings.customQuotes.map((quote) => <div className="custom-quote" key={quote.id}>
++                <span className="custom-quote-text">{quote.text}</span>
++                <select className="custom-quote-emotion" value={quote.emotion} aria-label="OllO's face for this quote" onChange={(event) => updateCustomQuote(quote.id, { emotion: event.target.value as QuoteEmotion })}>
++                  <option value="auto">Auto</option>
++                  {(Object.keys(MOOD_LABELS) as Mood[]).map((m) => <option key={m} value={m}>{MOOD_LABELS[m]}</option>)}
++                </select>
++                <button className="text-icon danger" onClick={() => deleteCustomQuote(quote.id)} aria-label="Delete quote"><TrashIcon /></button>
++              </div>)}
++            </div>}
++          </div>
+           <label className="settings-field"><span>Default image mode</span><select value={library.settings.defaultImageMode} onChange={(event) => { const mode = event.target.value as ImageMode; setImageMode(mode); updateLibrary((previous) => ({ ...previous, settings: { ...previous.settings, defaultImageMode: mode } })); }}><option value="mono">Black & white</option><option value="gray2">Grayscale · 4 tones</option><option value="rgb565">Color</option></select></label>
+           <button className="soft-button forget-device" onClick={() => { bleManager.forgetDevice(); setNotice('Saved glasses forgotten.'); }}>Forget saved glasses</button>
+           <p className="settings-footnote">OllO does not currently include firmware update controls.</p>
+diff --git a/ollo-app/src/mascot/Mascot.tsx b/ollo-app/src/mascot/Mascot.tsx
+index 7c8eb5b..bc86b4b 100644
+--- a/ollo-app/src/mascot/Mascot.tsx
++++ b/ollo-app/src/mascot/Mascot.tsx
+@@ -21,7 +21,8 @@ interface Pose {
+   pupil: number;
+   /** 0..1 brow visibility */
+   brow: number;
+-  browY: number;
++  browLeftY: number;
++  browRightY: number;
+   browLeftRot: number;
+   browRightRot: number;
+   /** 0..1 cross-fade from normal eyes to smiling ^ ^ eyes */
+@@ -31,9 +32,13 @@ interface Pose {
+   floatAmp: number;
+   floatPeriod: number;
+   tilt: number;
++  /** constant head tilt in degrees (negative = chin up) */
++  baseTilt: number;
+   offsetY: number;
+   jitter: number;
+   hop: number;
++  /** average seconds between hops */
++  hopGap: number;
+   /** where the eyes like to rest (-1..1) */
+   gazeX: number;
+   gazeY: number;
+@@ -43,11 +48,15 @@ interface Pose {
+ }
+ 
+ const POSES: Record<Mood, Pose> = {
+-  neutral: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browY: 12, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0, floatAmp: 6, floatPeriod: 3.8, tilt: 1.6, offsetY: 0, jitter: 0, hop: 0, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 2.2, blinkMax: 5.5 },
+-  happy: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browY: 12, browLeftRot: 0, browRightRot: 0, smile: 1, sparkle: 0, floatAmp: 9, floatPeriod: 2.6, tilt: 2.6, offsetY: -2, jitter: 0, hop: 1, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
+-  proud: { lidTop: 12, lidBottom: 4, pupil: 1, brow: 1, browY: -9, browLeftRot: -3, browRightRot: 3, smile: 0, sparkle: 1, floatAmp: 6, floatPeriod: 4.4, tilt: 1.2, offsetY: -5, jitter: 0, hop: 0, gazeX: 0.45, gazeY: -0.7, gazeWander: 0.25, blinkMin: 3.5, blinkMax: 7 },
+-  sad: { lidTop: 7, lidBottom: 0, pupil: 1, brow: 1, browY: 2, browLeftRot: -15, browRightRot: 15, smile: 0, sparkle: 0, floatAmp: 3, floatPeriod: 5.6, tilt: 0.8, offsetY: 7, jitter: 0, hop: 0, gazeX: -0.2, gazeY: 0.85, gazeWander: 0.3, blinkMin: 2, blinkMax: 4.5 },
+-  angry: { lidTop: 5, lidBottom: 0, pupil: 0.82, brow: 1, browY: 0, browLeftRot: 19, browRightRot: -17, smile: 0, sparkle: 0, floatAmp: 3.2, floatPeriod: 1.9, tilt: 0.6, offsetY: 0, jitter: 1, hop: 0, gazeX: 0, gazeY: 0.15, gazeWander: 0.12, blinkMin: 4.5, blinkMax: 8 }
++  neutral: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0, floatAmp: 6, floatPeriod: 3.8, tilt: 1.6, baseTilt: 0, offsetY: 0, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 2.2, blinkMax: 5.5 },
++  happy: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 1, sparkle: 0, floatAmp: 9, floatPeriod: 2.6, tilt: 2.6, baseTilt: 0, offsetY: -2, jitter: 0, hop: 1, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
++  // wide open eyes, high brows, quick little hops
++  excited: { lidTop: -5, lidBottom: -3, pupil: 1.2, brow: 1, browLeftY: -13, browRightY: -13, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0.75, floatAmp: 10, floatPeriod: 1.7, tilt: 3.2, baseTilt: 0, offsetY: -4, jitter: 0, hop: 1.5, hopGap: 2.1, gazeX: 0, gazeY: -0.1, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
++  proud: { lidTop: 12, lidBottom: 4, pupil: 1, brow: 1, browLeftY: -9, browRightY: -9, browLeftRot: -3, browRightRot: 3, smile: 0, sparkle: 1, floatAmp: 6, floatPeriod: 4.4, tilt: 1.2, baseTilt: -4, offsetY: -5, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0.45, gazeY: -0.7, gazeWander: 0.25, blinkMin: 3.5, blinkMax: 7 },
++  // smug: half-lidded side-eye, one brow up and the other slanted down
++  cocky: { lidTop: 11, lidBottom: 3, pupil: 0.95, brow: 1, browLeftY: -11, browRightY: 4, browLeftRot: -5, browRightRot: -13, smile: 0, sparkle: 0, floatAmp: 5, floatPeriod: 4, tilt: 2.2, baseTilt: 4, offsetY: -2, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.85, gazeY: 0.1, gazeWander: 0.12, blinkMin: 3.5, blinkMax: 7 },
++  sad: { lidTop: 7, lidBottom: 0, pupil: 1, brow: 1, browLeftY: 2, browRightY: 2, browLeftRot: -15, browRightRot: 15, smile: 0, sparkle: 0, floatAmp: 3, floatPeriod: 5.6, tilt: 0.8, baseTilt: 0, offsetY: 7, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.2, gazeY: 0.85, gazeWander: 0.3, blinkMin: 2, blinkMax: 4.5 },
++  angry: { lidTop: 5, lidBottom: 0, pupil: 0.82, brow: 1, browLeftY: 0, browRightY: 0, browLeftRot: 19, browRightRot: -17, smile: 0, sparkle: 0, floatAmp: 3.2, floatPeriod: 1.9, tilt: 0.6, baseTilt: 0, offsetY: 0, jitter: 1, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0.15, gazeWander: 0.12, blinkMin: 4.5, blinkMax: 8 }
+ };
+ 
+ // Measured from the mascot PNGs.
+@@ -207,7 +216,7 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+         rot += Math.sin(t * w * 0.7) * cur.tilt;
+         // happy hop
+         if (cur.hop > 0.05) {
+-          if (t >= nextHop) { hopStart = t; nextHop = t + rand(3.4, 5.2); }
++          if (t >= nextHop) { hopStart = t; nextHop = t + rand(cur.hopGap * 0.75, cur.hopGap * 1.3); }
+           const p = (t - hopStart) / 0.55;
+           if (p >= 0 && p <= 1) {
+             const arc = Math.sin(Math.PI * p);
+@@ -222,7 +231,7 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+         }
+         if (t < shakeUntil) dx += Math.sin(t * 95) * 2.2 * Math.max(cur.jitter, 0.4);
+       }
+-      rot += (moodRef.current === 'proud' ? -4 : 0) * (cur.sparkle) + (moodRef.current === 'angry' ? 0 : 0);
++      rot += cur.baseTilt;
+       sy += spring * 0.12;
+       sx -= spring * 0.08;
+ 
+@@ -282,7 +291,8 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+       // ---- brows
+       brows.forEach((el, i) => {
+         const rotB = i === 0 ? cur.browLeftRot : cur.browRightRot;
+-        el.setAttribute('transform', `translate(${BROW_X[i]} ${(BROW_Y + cur.browY).toFixed(2)}) rotate(${rotB.toFixed(2)})`);
++        const y = BROW_Y + (i === 0 ? cur.browLeftY : cur.browRightY);
++        el.setAttribute('transform', `translate(${BROW_X[i]} ${y.toFixed(2)}) rotate(${rotB.toFixed(2)})`);
+         el.setAttribute('opacity', clamp(cur.brow, 0, 1).toFixed(3));
+       });
+ 
+diff --git a/ollo-app/src/mascot/director.ts b/ollo-app/src/mascot/director.ts
+new file mode 100644
+index 0000000..a53de5e
+--- /dev/null
++++ b/ollo-app/src/mascot/director.ts
+@@ -0,0 +1,146 @@
++import type { LibraryData, Mood, Quote, QuoteOfTheDay } from '../types';
++import { BUILT_IN_QUOTES } from './quotes';
++import { EGG_LINE, OLLO_LINES, type OlloLine, type Situation } from './lines';
++import { daysSincePractice, moodFromPractice, pickFromFamily } from './mood';
++
++/** What is currently shown in the yellow quote spot, and the face ollo makes while it is there. */
++export interface Display {
++  /** Unique per showing, so the words animate in again every time */
++  id: string;
++  text: string;
++  emotion: Mood;
++  kind: 'quote' | 'ollo' | 'egg';
++}
++
++/** All the knobs for ollo's personality in one place. */
++export const DIRECTOR_RULES = {
++  /** Quote of the day changes this often (windows start at local midnight and noon) */
++  quoteHours: 12,
++  /** Re-opening the app within this many minutes counts as "back soon" */
++  soonMinutes: 60,
++  /** Chance ollo says something (instead of showing the quote) in everyday situations. Big moments always speak. */
++  everydayLineChance: 0.6,
++  /** Easter egg: this many app opens within eggOpenWindowMs ... */
++  eggOpens: 4,
++  eggOpenWindowMs: 3 * 60_000,
++  /** ... or this many returns to the main menu within eggMenuWindowMs */
++  eggMenuVisits: 4,
++  eggMenuWindowMs: 30_000
++} as const;
++
++const ALWAYS_SPEAK: Situation[] = ['welcome', 'soon', 'missed', 'gone'];
++
++let counter = 0;
++const nextId = (prefix: string) => `${prefix}-${Date.now()}-${counter++}`;
++
++export function quotePool(library: LibraryData): Quote[] {
++  const { customQuotes, useBuiltInQuotes } = library.settings;
++  const custom = (customQuotes ?? []).filter((quote) => quote.text.trim());
++  const pool = [...(useBuiltInQuotes ? BUILT_IN_QUOTES : []), ...custom];
++  return pool.length ? pool : BUILT_IN_QUOTES;
++}
++
++/** Index of the current 12-hour window in local time. */
++export function quoteSlot(now: number): number {
++  const offsetMs = -new Date(now).getTimezoneOffset() * 60_000;
++  return Math.floor((now + offsetMs) / (DIRECTOR_RULES.quoteHours * 3_600_000));
++}
++
++/** Keeps the saved quote of the day while its window lasts; otherwise rolls a new one (never the same twice in a row). */
++export function resolveQuoteOfTheDay(library: LibraryData, now: number): QuoteOfTheDay {
++  const slot = quoteSlot(now);
++  const pool = quotePool(library);
++  const saved = library.quoteOfTheDay;
++  if (saved && saved.slot === slot && pool.some((quote) => quote.id === saved.quoteId)) return saved;
++  const candidates = pool.length > 1 ? pool.filter((quote) => quote.id !== saved?.quoteId) : pool;
++  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
++  return { slot, quoteId: chosen.id };
++}
++
++export function quoteDisplay(library: LibraryData, qotd: QuoteOfTheDay, now: number): Display {
++  const pool = quotePool(library);
++  const quote = pool.find((item) => item.id === qotd.quoteId) ?? pool[0];
++  const base = moodFromPractice(library.practice, new Date(now));
++  const emotion: Mood = quote.emotion === 'auto' ? pickFromFamily(base) : quote.emotion;
++  return { id: nextId('quote'), text: quote.text, emotion, kind: 'quote' };
++}
++
++export function eggDisplay(): Display {
++  return { id: nextId('egg'), text: EGG_LINE.text, emotion: EGG_LINE.emotion, kind: 'egg' };
++}
++
++function situationFor(library: LibraryData, now: number): Situation | null {
++  const stats = library.practice;
++  const meta = library.meta ?? {};
++  const soon = meta.lastOpenAt !== undefined && now - meta.lastOpenAt < DIRECTOR_RULES.soonMinutes * 60_000;
++
++  if (stats) {
++    const days = daysSincePractice(stats, new Date(now));
++    if (days >= 3) return 'gone';
++    if (days === 2) return 'missed';
++    if (soon) return 'soon';
++    if (stats.streak >= 3) return 'streak';
++    if (days === 0) return 'today';
++    return 'yesterday';
++  }
++  // No practice yet: greet on the very first open, cheer if they come straight back.
++  if (!meta.openCount) return 'welcome';
++  return soon ? 'soon' : null;
++}
++
++function pickLine(situation: Situation, avoidId?: string): OlloLine {
++  const all = OLLO_LINES[situation];
++  const options = all.length > 1 ? all.filter((line) => line.id !== avoidId) : all;
++  return options[Math.floor(Math.random() * options.length)];
++}
++
++function fillIn(text: string, library: LibraryData, now: number): string {
++  const stats = library.practice;
++  return text
++    .replace('{streak}', String(stats?.streak ?? 1))
++    .replace('{days}', String(stats ? daysSincePractice(stats, new Date(now)) : 0));
++}
++
++export interface OpenResult {
++  display: Display;
++  library: LibraryData;
++}
++
++/**
++ * Called every time the app is opened (or comes back to the foreground).
++ * Records the open, then decides whether ollo speaks, the Easter egg fires, or the quote of the day shows.
++ */
++export function handleAppOpen(library: LibraryData, now: number): OpenResult {
++  const meta = library.meta ?? {};
++  const recentOpens = [...(meta.recentOpens ?? []).filter((t) => now - t < DIRECTOR_RULES.eggOpenWindowMs), now];
++  // Keeps teasing for as long as the user keeps reopening the app to fish for other emotions.
++  const eggReady = recentOpens.length >= DIRECTOR_RULES.eggOpens;
++
++  const situation = eggReady ? null : situationFor(library, now);
++  const speaks = !!situation && (ALWAYS_SPEAK.includes(situation) || Math.random() < DIRECTOR_RULES.everydayLineChance);
++
++  const qotd = resolveQuoteOfTheDay(library, now);
++  let display: Display;
++  let lastLineId = meta.lastLineId;
++  let lastEggAt = meta.lastEggAt;
++
++  if (eggReady) {
++    display = eggDisplay();
++    lastEggAt = now;
++  } else if (situation && speaks) {
++    const line = pickLine(situation, meta.lastLineId);
++    display = { id: nextId('ollo'), text: fillIn(line.text, library, now), emotion: line.emotion, kind: 'ollo' };
++    lastLineId = line.id;
++  } else {
++    display = quoteDisplay(library, qotd, now);
++  }
++
++  return {
++    display,
++    library: {
++      ...library,
++      quoteOfTheDay: qotd,
++      meta: { ...meta, openCount: (meta.openCount ?? 0) + 1, lastOpenAt: now, recentOpens, lastEggAt, lastLineId }
++    }
++  };
++}
+diff --git a/ollo-app/src/mascot/lines.ts b/ollo-app/src/mascot/lines.ts
+new file mode 100644
+index 0000000..1fc66f4
+--- /dev/null
++++ b/ollo-app/src/mascot/lines.ts
+@@ -0,0 +1,73 @@
++import type { Mood } from '../types';
++
++/**
++ * Things ollo says on his own (as opposed to the quote of the day).
++ * Each line carries the emotion ollo makes while saying it.
++ * {streak} and {days} get filled in with the user's numbers.
++ */
++export type Situation =
++  | 'welcome'   // very first time the app opens
++  | 'soon'      // user came back shortly after the last time
++  | 'streak'    // several days in a row
++  | 'today'     // already practiced today, opened the app again later
++  | 'yesterday' // last practiced yesterday
++  | 'missed'    // 2 days away
++  | 'gone';     // 3+ days away
++
++export interface OlloLine {
++  id: string;
++  text: string;
++  emotion: Mood;
++}
++
++function lines(situation: Situation, entries: [string, Mood][]): OlloLine[] {
++  return entries.map(([text, emotion], i) => ({ id: `${situation}-${i}`, text, emotion }));
++}
++
++export const OLLO_LINES: Record<Situation, OlloLine[]> = {
++  welcome: lines('welcome', [
++    ['Hi! I’m OllO. Let’s learn something.', 'happy'],
++    ['New face! Let’s get started.', 'excited']
++  ]),
++  soon: lines('soon', [
++    ['So back soon? NICE!', 'excited'],
++    ['THAT’S THE SPIRIT!', 'excited'],
++    ['Back already? I like it.', 'happy'],
++    ['Can’t stay away, huh?', 'cocky'],
++    ['Look who’s eager!', 'happy']
++  ]),
++  streak: lines('streak', [
++    ['{streak} days in a row. Wow.', 'proud'],
++    ['Look at you go!', 'excited'],
++    ['Streak alive. Don’t ruin it.', 'cocky'],
++    ['{streak} days! I’m impressed.', 'proud']
++  ]),
++  today: lines('today', [
++    ['Round two? Let’s go!', 'excited'],
++    ['You again? Love it.', 'happy'],
++    ['Okay, overachiever.', 'cocky'],
++    ['Still going? Impressive.', 'proud']
++  ]),
++  yesterday: lines('yesterday', [
++    ['Ready for today’s round?', 'neutral'],
++    ['Fresh day, fresh cards.', 'happy'],
++    ['Let’s keep it rolling.', 'neutral']
++  ]),
++  missed: lines('missed', [
++    ['I missed you…', 'sad'],
++    ['Where have you been?', 'sad'],
++    ['I almost thought you gave up.', 'cocky']
++  ]),
++  gone: lines('gone', [
++    ['{days} days. We need to talk.', 'angry'],
++    ['Oh, NOW you show up.', 'angry'],
++    ['I almost thought you gave up.', 'cocky'],
++    ['Cards don’t study themselves!', 'angry']
++  ])
++};
++
++export const EGG_LINE: OlloLine = {
++  id: 'egg-0',
++  text: 'Trying to cycle to see my other emotions? Na na na you won’t.',
++  emotion: 'cocky'
++};
+diff --git a/ollo-app/src/mascot/mood.ts b/ollo-app/src/mascot/mood.ts
+index 7032021..b6db5b6 100644
+--- a/ollo-app/src/mascot/mood.ts
++++ b/ollo-app/src/mascot/mood.ts
+@@ -1,6 +1,6 @@
+-import type { PracticeStats } from '../types';
++import type { Mood, PracticeStats } from '../types';
+ 
+-export type Mood = 'neutral' | 'happy' | 'proud' | 'sad' | 'angry';
++export type { Mood };
+ 
+ /**
+  * Tweak these to change how quickly ollo gets upset or proud.
+@@ -17,6 +17,32 @@ export const MOOD_RULES = {
+   proudStreakDays: 3
+ } as const;
+ 
++/** Moods that feel alike. Used to vary ollo's face without changing how he "feels" overall. */
++export const MOOD_FAMILY: Record<Mood, Mood[]> = {
++  neutral: ['neutral'],
++  happy: ['happy', 'excited'],
++  excited: ['excited', 'happy'],
++  proud: ['proud', 'excited'],
++  cocky: ['cocky'],
++  sad: ['sad'],
++  angry: ['angry']
++};
++
++export function pickFromFamily(mood: Mood): Mood {
++  const family = MOOD_FAMILY[mood];
++  return family[Math.floor(Math.random() * family.length)];
++}
++
++export const MOOD_LABELS: Record<Mood, string> = {
++  neutral: 'Calm',
++  happy: 'Happy',
++  excited: 'Excited',
++  proud: 'Proud',
++  cocky: 'Cocky',
++  sad: 'Sad',
++  angry: 'Angry'
++};
++
+ export function dayKey(date: Date = new Date()): string {
+   const y = date.getFullYear();
+   const m = String(date.getMonth() + 1).padStart(2, '0');
+@@ -32,27 +58,40 @@ function daysBetween(fromKey: string, toKey: string): number {
+   return Math.round((to - from) / 86_400_000);
+ }
+ 
+-/** Returns the new stats after one card has been practiced. */
+-export function recordPracticeStats(previous: PracticeStats | undefined, now: Date = new Date()): PracticeStats {
++/** Whole calendar days since the user last practiced (0 = today). */
++export function daysSincePractice(stats: PracticeStats, now: Date = new Date()): number {
++  return daysBetween(stats.lastDay, dayKey(now));
++}
++
++/** Returns the new stats after one card has been practiced. The same card only counts once per day. */
++export function recordPracticeStats(previous: PracticeStats | undefined, cardId: string, now: Date = new Date()): PracticeStats {
+   const today = dayKey(now);
+   if (previous && previous.lastDay === today) {
+-    return { ...previous, lastAt: now.getTime(), todayCount: previous.todayCount + 1 };
++    const known = previous.cardIds ?? [];
++    if (known.includes(cardId)) return previous;
++    return {
++      ...previous,
++      lastAt: now.getTime(),
++      cardIds: [...known, cardId],
++      todayCount: Math.max(previous.todayCount, known.length) + 1
++    };
+   }
+   const continuesStreak = previous ? daysBetween(previous.lastDay, today) === 1 : false;
+   return {
+     lastDay: today,
+     lastAt: now.getTime(),
+     todayCount: 1,
++    cardIds: [cardId],
+     streak: continuesStreak && previous ? previous.streak + 1 : 1
+   };
+ }
+ 
+-/** Picks ollo's mood from how the user has been practicing. */
++/** Picks ollo's base mood from how the user has been practicing. */
+ export function moodFromPractice(stats: PracticeStats | undefined, now: Date = new Date()): Mood {
+   // Brand-new user: friendly and calm, nobody to be angry at yet.
+   if (!stats) return 'neutral';
+ 
+-  const daysSince = daysBetween(stats.lastDay, dayKey(now));
++  const daysSince = daysSincePractice(stats, now);
+ 
+   if (daysSince <= 0) {
+     const proud = stats.todayCount >= MOOD_RULES.proudCardsToday || stats.streak >= MOOD_RULES.proudStreakDays;
+@@ -63,9 +102,9 @@ export function moodFromPractice(stats: PracticeStats | undefined, now: Date = n
+   return 'neutral';
+ }
+ 
+-const VALID: Mood[] = ['neutral', 'happy', 'proud', 'sad', 'angry'];
++const VALID: Mood[] = ['neutral', 'happy', 'excited', 'proud', 'cocky', 'sad', 'angry'];
+ 
+-/** Dev helper: open the app with ?mood=angry to preview a mood without waiting days. */
++/** Dev helper: open the app with ?mood=angry to force a face. */
+ export function moodFromUrl(): Mood | undefined {
+   try {
+     const value = new URLSearchParams(window.location.search).get('mood');
+diff --git a/ollo-app/src/mascot/quotes.ts b/ollo-app/src/mascot/quotes.ts
+new file mode 100644
+index 0000000..8fc7339
+--- /dev/null
++++ b/ollo-app/src/mascot/quotes.ts
+@@ -0,0 +1,34 @@
++import type { Quote, QuoteEmotion } from '../types';
++
++const q = (id: string, text: string, emotion: QuoteEmotion): Quote => ({ id: `builtin-${id}`, text, emotion });
++
++/**
++ * Quotes that ship with the app. They mix into the "quote of the day" together with the user's own.
++ * `emotion` is the face ollo makes while the quote is on screen ('auto' = follows the user's progress).
++ */
++export const BUILT_IN_QUOTES: Quote[] = [
++  q('boats', "Who's gonna carry the boats!", 'excited'),
++  q('small-steps', 'Small steps still move you forward.', 'happy'),
++  q('one-more', 'One more card. Just one.', 'cocky'),
++  q('future-you', 'Future you is watching. Impress them.', 'proud'),
++  q('early-drafts', 'Wrong answers are just early drafts.', 'happy'),
++  q('hungry', 'Stay hungry. Stay curious.', 'excited'),
++  q('consistency', 'Consistency beats intensity.', 'proud'),
++  q('brain-muscle', 'Your brain is a muscle. Let’s lift.', 'excited'),
++  q('beginner', 'Every expert was once a beginner.', 'neutral'),
++  q('five-minutes', 'Five minutes today beats an hour someday.', 'auto'),
++  q('discipline', 'Discipline is remembering what you want.', 'proud'),
++  q('tired', 'Tired? Do one card anyway.', 'cocky'),
++  q('not-done', 'You’re not done. You’re just warming up.', 'excited'),
++  q('rep', 'Every review is a rep. Keep lifting.', 'happy'),
++  q('forget', 'Forgetting is normal. Reviewing is the fix.', 'neutral'),
++  q('progress', 'Progress looks boring. Do it anyway.', 'auto'),
++  q('proud-soon', 'Soon you’ll be proud you started.', 'happy'),
++  q('curious', 'Be curious, not furious.', 'happy'),
++  q('mastery', 'Mastery is a lot of tiny wins.', 'proud'),
++  q('show-up', 'Showing up is the hardest part. You did it.', 'auto'),
++  q('level-up', 'Level up one card at a time.', 'excited'),
++  q('easy', 'It gets easier. Then you get better.', 'neutral'),
++  q('ahead', 'Everyone you admire started here too.', 'happy'),
++  q('lazy', 'Bet you can’t stop at just one.', 'cocky')
++];
+diff --git a/ollo-app/src/storage.ts b/ollo-app/src/storage.ts
+index 1174a5b..7efa7d7 100644
+--- a/ollo-app/src/storage.ts
++++ b/ollo-app/src/storage.ts
+@@ -22,7 +22,15 @@ function database(): Promise<IDBPDatabase<OllODatabase>> {
+ export async function loadLibrary(): Promise<LibraryData> {
+   const db = await database();
+   const existing = await db.get('library', 'main');
+-  if (existing) return { ...existing, settings: { ...DEFAULT_SETTINGS, ...existing.settings } };
++  if (existing) {
++    const settings = { ...DEFAULT_SETTINGS, ...existing.settings };
++    // Older versions had a single editable quote. Keep it as one of the user's own quotes if they changed it.
++    const legacy = existing.settings.motivationalQuote?.trim();
++    if (!existing.settings.customQuotes && legacy && legacy !== DEFAULT_SETTINGS.motivationalQuote) {
++      settings.customQuotes = [{ id: crypto.randomUUID(), text: legacy, emotion: 'auto' }];
++    }
++    return { ...existing, settings };
++  }
+   const initial: LibraryData = { cards: DEMO_CARDS, settings: DEFAULT_SETTINGS };
+   await db.put('library', initial, 'main');
+   return initial;
+diff --git a/ollo-app/src/styles.css b/ollo-app/src/styles.css
+index d9c262a..f67a1d3 100644
+--- a/ollo-app/src/styles.css
++++ b/ollo-app/src/styles.css
+@@ -173,3 +173,18 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .play-option strong { display: block; font-size: 17px; }
+ .play-option small { display: block; margin-top: 3px; color: #aaa; font-size: 13px; }
+ .play-option-icon { display: grid; place-items: center; flex: 0 0 52px; height: 52px; border-radius: 16px; background: var(--cream); color: #050505; font-size: 32px; }
++
++/* Quote editor (settings) */
++.quote.long { font-size: clamp(16px, 3.3vw, 24px); }
++.quote-editor { background: var(--surface); border-radius: 18px; padding: 17px; display: flex; flex-direction: column; gap: 12px; }
++.quote-editor-title { font-weight: 800; font-size: 17px; }
++.quote-editor textarea.text-field { min-height: 78px; resize: vertical; }
++.quote-editor-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
++.quote-emotion-label { display: flex; flex-direction: column; gap: 7px; flex: 1; color: #aaa; font-size: 13px; }
++.quote-emotion-label select { width: 100%; }
++.mascot-preview { width: 120px; flex: 0 0 120px; }
++.custom-quote-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
++.custom-quote { display: flex; align-items: center; gap: 10px; background: #373737; border-radius: 14px; padding: 10px 12px; }
++.custom-quote-text { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
++.custom-quote-emotion { border: 1px solid #646464; border-radius: 10px; background: var(--surface); color: var(--cream); padding: 6px 8px; font-size: 12px; }
++.custom-quote .text-icon { font-size: 24px; color: var(--red); }
+diff --git a/ollo-app/src/types.ts b/ollo-app/src/types.ts
+index 82de6a0..a764e19 100644
+--- a/ollo-app/src/types.ts
++++ b/ollo-app/src/types.ts
+@@ -1,4 +1,15 @@
+ export type ImageMode = 'mono' | 'gray2' | 'rgb565';
++/** Every face ollo can make. */
++export type Mood = 'neutral' | 'happy' | 'excited' | 'proud' | 'cocky' | 'sad' | 'angry';
++/** A quote's emotion. 'auto' means "follow how the user has been practicing". */
++export type QuoteEmotion = Mood | 'auto';
++
++export interface Quote {
++  id: string;
++  text: string;
++  emotion: QuoteEmotion;
++}
++
+ export type AppScreen = 'home' | 'folder' | 'study' | 'editor' | 'sync' | 'settings';
+ 
+ export interface Card {
+@@ -28,10 +39,31 @@ export interface StoredImage {
+ 
+ export interface AppSettings {
+   autoReconnect: boolean;
++  /** @deprecated Replaced by customQuotes. Kept so older saved libraries still load. */
+   motivationalQuote: string;
++  /** Quotes the user wrote themselves, each with the emotion ollo shows while it is on screen. */
++  customQuotes: Quote[];
++  /** Mix the built-in quotes into the quote of the day. */
++  useBuiltInQuotes: boolean;
+   defaultImageMode: ImageMode;
+ }
+ 
++/** Bookkeeping for ollo's personality (when the app was opened, what he last said, ...). */
++export interface MascotMeta {
++  openCount?: number;
++  lastOpenAt?: number;
++  /** Recent app opens, used for the "stop trying to cycle my emotions" Easter egg */
++  recentOpens?: number[];
++  lastEggAt?: number;
++  lastLineId?: string;
++}
++
++export interface QuoteOfTheDay {
++  /** Index of the 12-hour window (local time) this quote belongs to */
++  slot: number;
++  quoteId: string;
++}
++
+ /** Tracks how the user has been practicing, so ollo can react to it. */
+ export interface PracticeStats {
+   /** Local calendar day of the last practiced card, YYYY-MM-DD */
+@@ -39,6 +71,8 @@ export interface PracticeStats {
+   lastAt: number;
+   /** Unique cards practiced on lastDay */
+   todayCount: number;
++  /** Ids of the cards counted on lastDay, so re-studying the same card doesn't count twice */
++  cardIds?: string[];
+   /** Consecutive days practiced, ending at lastDay */
+   streak: number;
+ }
+@@ -50,6 +84,8 @@ export interface LibraryData {
+   lastStudied?: { folder: string; cardId: string };
+   lastCardByFolder?: Record<string, string>;
+   practice?: PracticeStats;
++  meta?: MascotMeta;
++  quoteOfTheDay?: QuoteOfTheDay;
+   lastSyncedAt?: number;
+   lastSyncedCounts?: { cards: number; images: number; folders: number };
+ }
+@@ -57,6 +93,8 @@ export interface LibraryData {
+ export const DEFAULT_SETTINGS: AppSettings = {
+   autoReconnect: true,
+   motivationalQuote: "Who's gonna carry the boats!",
++  customQuotes: [],
++  useBuiltInQuotes: true,
+   defaultImageMode: 'gray2'
+ };
+ 

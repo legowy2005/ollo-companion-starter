@@ -1,0 +1,33 @@
+.ollo-mascot {
+  display: block;
+  width: clamp(150px, 42vw, 270px);
+  flex: 0 0 auto;
+  overflow: visible;
+  color: var(--cream, #fff4eb);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Quote text: every word floats a little out of step with its neighbours. */
+.floaty-quote { display: block; animation: quote-drift 7.5s ease-in-out infinite; }
+.floaty-word { display: inline-block; animation: word-in .55s cubic-bezier(.2, .9, .3, 1.25) both; animation-delay: calc(var(--i) * 70ms + 260ms); }
+.floaty-word > span { display: inline-block; animation: word-float 4.4s ease-in-out infinite; animation-delay: calc(var(--i) * -380ms); }
+
+@keyframes word-in {
+  from { opacity: 0; transform: translateY(14px) scale(.9); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes word-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3.5px); }
+}
+@keyframes quote-drift {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  50% { transform: rotate(.7deg) translate(2px, -4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .floaty-quote, .floaty-word, .floaty-word > span { animation: none; }
+}

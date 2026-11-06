@@ -1,0 +1,656 @@
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index 00ce9da..4ba6944 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -7,6 +7,9 @@ import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, t
+ import { bleManager } from './ble/BleManager';
+ import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
+ import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon } from './icons';
++import { Mascot } from './mascot/Mascot';
++import { FloatyText } from './mascot/FloatyText';
++import { moodFromPractice, moodFromUrl, recordPracticeStats } from './mascot/mood';
+ import './styles.css';
+ 
+ type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+@@ -30,20 +33,6 @@ function folderNames(cards: Card[]): string[] {
+   return [...new Set(cards.map((card) => card.folder.trim() || 'OllO'))].sort((a, b) => a.localeCompare(b));
+ }
+ 
+-function GlassesMark() {
+-  return (
+-    <svg className="glasses-mark" viewBox="0 0 150 65" role="img" aria-label="OllO glasses">
+-      <g fill="none" stroke="currentColor" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round">
+-        <path d="M5 12h53v36a9 9 0 0 1-9 9H14a9 9 0 0 1-9-9z" />
+-        <path d="M92 12h53v36a9 9 0 0 1-9 9h-35a9 9 0 0 1-9-9z" />
+-        <path d="M58 23h34" />
+-      </g>
+-      <circle cx="31" cy="38" r="6" fill="currentColor" />
+-      <circle cx="119" cy="38" r="6" fill="currentColor" />
+-    </svg>
+-  );
+-}
+-
+ function shuffled<T>(items: T[]): T[] {
+   const copy = [...items];
+   for (let i = copy.length - 1; i > 0; i--) {
+@@ -84,6 +73,7 @@ export default function App() {
+   const [notice, setNotice] = useState('');
+   const [viewerSrc, setViewerSrc] = useState<string | undefined>();
+   const fileInput = useRef<HTMLInputElement>(null);
++  const practicedIds = useRef<Set<string>>(new Set());
+ 
+   useEffect(() => {
+     let mounted = true;
+@@ -140,6 +130,8 @@ export default function App() {
+     return () => window.clearTimeout(timer);
+   }, [notice]);
+ 
++  // ollo's mood is re-evaluated every time the main menu is shown (and whenever practice changes).
++  const mood = useMemo(() => moodFromUrl() ?? moodFromPractice(library?.practice), [screen, library?.practice]);
+   const folders = useMemo(() => library ? folderNames(library.cards) : [], [library]);
+   const homeFolders = useMemo(() => {
+     if (!library) return [];
+@@ -293,8 +285,21 @@ export default function App() {
+     if (editorCard?.id === cardId) setEditorCard((previous) => previous ? { ...previous, bookmarked: !previous.bookmarked } : previous);
+   }
+ 
++  /** Counts a card as practiced (once per card per app run) so ollo can be happy about it. */
++  function recordPractice(cardId: string) {
++    if (practicedIds.current.has(cardId)) return;
++    practicedIds.current.add(cardId);
++    updateLibrary((previous) => ({ ...previous, practice: recordPracticeStats(previous.practice) }));
++  }
++
++  function flipStudyCard() {
++    if (activeStudyCard && !studyBack) recordPractice(activeStudyCard.id);
++    setStudyBack((value) => !value);
++  }
++
+   function rateCard(rating: 1 | 2 | 3 | 4) {
+     if (!activeStudyCard) return;
++    recordPractice(activeStudyCard.id);
+     updateLibrary((previous) => ({ ...previous, cards: previous.cards.map((card) => card.id === activeStudyCard.id ? { ...card, rating } : card) }));
+   }
+ 
+@@ -376,7 +381,7 @@ export default function App() {
+     else setScreen('home');
+   }
+ 
+-  if (!library) return <main className="loading-screen"><GlassesMark /><p>Preparing OllO…</p></main>;
++  if (!library) return <main className="loading-screen"><Mascot mood="neutral" /><p>Preparing OllO…</p></main>;
+ 
+   return (
+     <main className="app-shell">
+@@ -404,8 +409,8 @@ export default function App() {
+       {screen === 'home' && (
+         <section className="home-screen">
+           <div className="motivation-row">
+-            <div className="quote">{library.settings.motivationalQuote}</div>
+-            <GlassesMark />
++            <div className="quote"><FloatyText text={library.settings.motivationalQuote} /></div>
++            <Mascot key={screen} mood={mood} />
+           </div>
+           <div className="folder-list">
+             {homeFolders.length === 0 ? <div className="empty-state">No folders yet. Add your first flashcard.</div> : homeFolders.map((folder) => {
+@@ -444,10 +449,10 @@ export default function App() {
+       {screen === 'study' && (
+         <section className="study-screen">
+           {activeStudyCard ? <>
+-            <div className="study-card" role="button" tabIndex={0} onClick={() => setStudyBack((value) => !value)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setStudyBack((value) => !value); } }}>
++            <div className="study-card" role="button" tabIndex={0} onClick={flipStudyCard} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); flipStudyCard(); } }}>
+               {activeStudyImage ? <img src={displaySrc(activeStudyImage)} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(displaySrc(activeStudyImage)); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
+             </div>
+-            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={() => setStudyBack((value) => !value)} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
++            <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={flipStudyCard} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
+             <div className="difficulty-rating" aria-label="Rate difficulty to memorize this card">
+               {([1, 2, 3, 4] as const).map((rating) => <button key={rating} className={`rating-segment rating-${rating} ${activeStudyCard.rating === rating ? 'chosen' : ''}`} onClick={() => rateCard(rating)} title={['Easy', 'Moderate', 'Difficult', 'Very difficult'][rating - 1]} aria-label={`Difficulty ${rating}`} />)}
+             </div>
+diff --git a/ollo-app/src/mascot/FloatyText.tsx b/ollo-app/src/mascot/FloatyText.tsx
+new file mode 100644
+index 0000000..fc8cb0f
+--- /dev/null
++++ b/ollo-app/src/mascot/FloatyText.tsx
+@@ -0,0 +1,19 @@
++/** Splits text into words so each one can bob gently on its own. Wrapping and selection still work normally. */
++export function FloatyText({ text }: { text: string }) {
++  const parts = text.split(/(\s+)/);
++  let index = 0;
++  return (
++    <span className="floaty-quote" aria-label={text}>
++      {parts.map((part, i) => {
++        if (!part) return null;
++        if (/^\s+$/.test(part)) return part;
++        const n = index++;
++        return (
++          <span key={i} className="floaty-word" aria-hidden="true" style={{ ['--i' as string]: n }}>
++            <span>{part}</span>
++          </span>
++        );
++      })}
++    </span>
++  );
++}
+diff --git a/ollo-app/src/mascot/Mascot.tsx b/ollo-app/src/mascot/Mascot.tsx
+new file mode 100644
+index 0000000..7c8eb5b
+--- /dev/null
++++ b/ollo-app/src/mascot/Mascot.tsx
+@@ -0,0 +1,347 @@
++import { useEffect, useRef } from 'react';
++import type { Mood } from './mood';
++import './mascot.css';
++
++/**
++ * The OllO mascot.
++ *
++ * Geometry comes straight from the supplied mascot art (500x500 PNGs): every eye is four rounded bars
++ * plus a pill-shaped pupil, with two vertical bars in the middle and optional eyebrows.
++ * Because the face is built from separate bars, we can animate lids, pupils and brows individually.
++ * All motion runs in one requestAnimationFrame loop that writes SVG attributes directly,
++ * so React never re-renders while ollo is moving.
++ */
++
++interface Pose {
++  /** how far the top lid is lowered (px in svg units) */
++  lidTop: number;
++  /** how far the bottom lid is raised */
++  lidBottom: number;
++  /** pupil size multiplier */
++  pupil: number;
++  /** 0..1 brow visibility */
++  brow: number;
++  browY: number;
++  browLeftRot: number;
++  browRightRot: number;
++  /** 0..1 cross-fade from normal eyes to smiling ^ ^ eyes */
++  smile: number;
++  /** 0..1 sparkles */
++  sparkle: number;
++  floatAmp: number;
++  floatPeriod: number;
++  tilt: number;
++  offsetY: number;
++  jitter: number;
++  hop: number;
++  /** where the eyes like to rest (-1..1) */
++  gazeX: number;
++  gazeY: number;
++  gazeWander: number;
++  blinkMin: number;
++  blinkMax: number;
++}
++
++const POSES: Record<Mood, Pose> = {
++  neutral: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browY: 12, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0, floatAmp: 6, floatPeriod: 3.8, tilt: 1.6, offsetY: 0, jitter: 0, hop: 0, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 2.2, blinkMax: 5.5 },
++  happy: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browY: 12, browLeftRot: 0, browRightRot: 0, smile: 1, sparkle: 0, floatAmp: 9, floatPeriod: 2.6, tilt: 2.6, offsetY: -2, jitter: 0, hop: 1, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
++  proud: { lidTop: 12, lidBottom: 4, pupil: 1, brow: 1, browY: -9, browLeftRot: -3, browRightRot: 3, smile: 0, sparkle: 1, floatAmp: 6, floatPeriod: 4.4, tilt: 1.2, offsetY: -5, jitter: 0, hop: 0, gazeX: 0.45, gazeY: -0.7, gazeWander: 0.25, blinkMin: 3.5, blinkMax: 7 },
++  sad: { lidTop: 7, lidBottom: 0, pupil: 1, brow: 1, browY: 2, browLeftRot: -15, browRightRot: 15, smile: 0, sparkle: 0, floatAmp: 3, floatPeriod: 5.6, tilt: 0.8, offsetY: 7, jitter: 0, hop: 0, gazeX: -0.2, gazeY: 0.85, gazeWander: 0.3, blinkMin: 2, blinkMax: 4.5 },
++  angry: { lidTop: 5, lidBottom: 0, pupil: 0.82, brow: 1, browY: 0, browLeftRot: 19, browRightRot: -17, smile: 0, sparkle: 0, floatAmp: 3.2, floatPeriod: 1.9, tilt: 0.6, offsetY: 0, jitter: 1, hop: 0, gazeX: 0, gazeY: 0.15, gazeWander: 0.12, blinkMin: 4.5, blinkMax: 8 }
++};
++
++// Measured from the mascot PNGs.
++const EYES = [
++  { cx: 157, left: 122.5, right: 191, topX1: 133.5, topX2: 179.5, pupilX: 147 },
++  { cx: 332, left: 297.5, right: 366, topX1: 308.5, topX2: 354.5, pupilX: 320.5 }
++] as const;
++const TOP_Y = 210.5;
++const BOTTOM_Y = 301.5;
++const SIDE_TOP = 221.5;
++const SIDE_BOTTOM = 290.5;
++const MID_Y = (TOP_Y + BOTTOM_Y) / 2;
++const PUPIL_Y1 = 255;
++const PUPIL_Y2 = 280;
++const PUPIL_REST_Y = 267.5;
++const STROKE = 11;
++const PUPIL_W = 16;
++const FACE_CX = 245;
++const FACE_CY = 256;
++const BROW_X = [165, 328.5];
++const BROW_Y = 172;
++
++const SPARKLES = [
++  { x: 402, y: 150, size: 1, phase: 0 },
++  { x: 86, y: 168, size: 0.7, phase: 2.1 },
++  { x: 414, y: 238, size: 0.55, phase: 4.2 }
++];
++const SPARKLE_PATH = 'M0 -10 L2.6 -2.6 L10 0 L2.6 2.6 L0 10 L-2.6 2.6 L-10 0 L-2.6 -2.6Z';
++
++const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
++const rand = (min: number, max: number) => min + Math.random() * (max - min);
++const ease = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
++
++interface Props {
++  mood: Mood;
++  className?: string;
++  /** Plays the pop-in entrance. Default true. */
++  pop?: boolean;
++  label?: string;
++}
++
++export function Mascot({ mood, className = '', pop = true, label }: Props) {
++  const svgRef = useRef<SVGSVGElement>(null);
++  const moodRef = useRef<Mood>(mood);
++  const reactRef = useRef<(strength: number) => void>(() => {});
++  const firstMood = useRef(true);
++
++  useEffect(() => {
++    moodRef.current = mood;
++    if (firstMood.current) { firstMood.current = false; return; }
++    reactRef.current(1);
++  }, [mood]);
++
++  useEffect(() => {
++    const svg = svgRef.current;
++    if (!svg) return;
++    const q = <T extends Element>(selector: string) => svg.querySelector<T>(selector)!;
++    const qa = <T extends Element>(selector: string) => [...svg.querySelectorAll<T>(selector)];
++
++    const body = q<SVGGElement>('[data-part=body]');
++    const tops = qa<SVGLineElement>('[data-part=top]');
++    const bottoms = qa<SVGLineElement>('[data-part=bottom]');
++    const lefts = qa<SVGLineElement>('[data-part=side-left]');
++    const rights = qa<SVGLineElement>('[data-part=side-right]');
++    const pupils = qa<SVGLineElement>('[data-part=pupil]');
++    const eyeGroups = qa<SVGGElement>('[data-part=eye]');
++    const smileGroups = qa<SVGGElement>('[data-part=smile]');
++    const brows = qa<SVGGElement>('[data-part=brow]');
++    const sparkles = qa<SVGPathElement>('[data-part=sparkle]');
++
++    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
++
++    // Animated values. Each one eases toward the target pose.
++    const cur = { ...POSES[moodRef.current] };
++    let gx = 0, gy = 0;               // current gaze
++    let tgx = 0, tgy = 0;             // target gaze
++    let blink = 0;                    // 0 open .. 1 closed
++    let blinkUntil = 0;
++    let nextBlink = rand(1.2, 3);
++    let nextWander = 0.9;
++    let lastPointer = -99;
++    let pointerGx = 0, pointerGy = 0;
++    let spring = 0, springV = 0;      // squash & stretch for taps and mood changes
++    let nextHop = 3.2;
++    let hopStart = -99;
++    let shakeUntil = 0;
++    let nextShake = rand(1.5, 3.5);
++    let startT = -1;
++    let last = 0;
++    let raf = 0;
++    const popDelay = 0.08;
++
++    reactRef.current = (strength: number) => {
++      springV += 7 * strength;
++      blinkUntil = performance.now() / 1000 + 0.12;
++      if (moodRef.current === 'angry') shakeUntil = performance.now() / 1000 + 0.7;
++    };
++
++    function onPointerMove(event: PointerEvent) {
++      const rect = svg!.getBoundingClientRect();
++      const cx = rect.left + rect.width / 2;
++      const cy = rect.top + rect.height / 2;
++      pointerGx = clamp((event.clientX - cx) / (window.innerWidth * 0.45), -1, 1);
++      pointerGy = clamp((event.clientY - cy) / (window.innerHeight * 0.45), -1, 1);
++      lastPointer = performance.now() / 1000;
++    }
++    window.addEventListener('pointermove', onPointerMove, { passive: true });
++    window.addEventListener('pointerdown', onPointerMove, { passive: true });
++
++    function frame(ms: number) {
++      const t = ms / 1000;
++      if (startT < 0) { startT = t; last = t; }
++      const dt = Math.min(0.05, t - last);
++      last = t;
++      const age = t - startT;
++      const target = POSES[moodRef.current];
++
++      // ---- ease numeric pose values toward the target mood
++      const rate = reduced ? 60 : 7;
++      for (const key of Object.keys(target) as (keyof Pose)[]) {
++        cur[key] += (target[key] - cur[key]) * ease(rate, dt);
++      }
++
++      // ---- blink
++      if (t >= nextBlink) {
++        blinkUntil = t + 0.11;
++        nextBlink = t + rand(target.blinkMin, target.blinkMax);
++        if (Math.random() < 0.22) nextBlink = t + 0.28; // quick double blink
++      }
++      const blinkTarget = t < blinkUntil ? 1 : 0;
++      blink += (blinkTarget - blink) * ease(blinkTarget ? 55 : 28, dt);
++
++      // ---- gaze: follow the pointer when it was recently used, otherwise glance around
++      if (t - lastPointer < 3.2) {
++        tgx = pointerGx; tgy = pointerGy;
++      } else if (!reduced && t >= nextWander) {
++        const w = target.gazeWander;
++        tgx = clamp(target.gazeX + rand(-1, 1) * w, -1, 1);
++        tgy = clamp(target.gazeY + rand(-1, 1) * w * 0.8, -1, 1);
++        nextWander = t + rand(1.1, 3.4);
++      } else if (reduced) {
++        tgx = target.gazeX; tgy = target.gazeY;
++      }
++      gx += (tgx - gx) * ease(14, dt);
++      gy += (tgy - gy) * ease(14, dt);
++
++      // ---- spring for squash & stretch
++      springV += (-90 * spring - 9 * springV) * dt;
++      spring += springV * dt;
++
++      // ---- body motion
++      let dx = 0, dy = cur.offsetY, rot = 0, sx = 1, sy = 1;
++      if (!reduced) {
++        const w = (Math.PI * 2) / cur.floatPeriod;
++        dy += Math.sin(t * w) * cur.floatAmp;
++        dx += Math.sin(t * w * 0.5 + 1) * 2.5;
++        rot += Math.sin(t * w * 0.7) * cur.tilt;
++        // happy hop
++        if (cur.hop > 0.05) {
++          if (t >= nextHop) { hopStart = t; nextHop = t + rand(3.4, 5.2); }
++          const p = (t - hopStart) / 0.55;
++          if (p >= 0 && p <= 1) {
++            const arc = Math.sin(Math.PI * p);
++            dy -= 18 * arc * cur.hop;
++            sy += 0.07 * arc * cur.hop;
++            sx -= 0.04 * arc * cur.hop;
++          }
++        }
++        // angry trembling
++        if (cur.jitter > 0.05) {
++          if (t >= nextShake) { shakeUntil = t + rand(0.5, 0.9); nextShake = t + rand(2.4, 4.5); }
++        }
++        if (t < shakeUntil) dx += Math.sin(t * 95) * 2.2 * Math.max(cur.jitter, 0.4);
++      }
++      rot += (moodRef.current === 'proud' ? -4 : 0) * (cur.sparkle) + (moodRef.current === 'angry' ? 0 : 0);
++      sy += spring * 0.12;
++      sx -= spring * 0.08;
++
++      // ---- pop in
++      let opacity = 1;
++      if (pop) {
++        const pt = Math.max(0, age - popDelay);
++        if (reduced) {
++          opacity = clamp(pt / 0.25, 0, 1);
++        } else {
++          opacity = clamp(pt / 0.14, 0, 1);
++          const s = 1 - Math.exp(-5.5 * pt) * Math.cos(13 * pt) * 0.75;
++          const lift = Math.exp(-5 * pt) * 46;
++          sx *= s; sy *= s; dy += lift;
++        }
++      }
++
++      body.setAttribute('transform', `translate(${dx.toFixed(2)} ${dy.toFixed(2)}) translate(${FACE_CX} ${FACE_CY}) rotate(${rot.toFixed(2)}) scale(${sx.toFixed(3)} ${sy.toFixed(3)}) translate(${-FACE_CX} ${-FACE_CY})`);
++      svg!.style.opacity = String(opacity);
++
++      // ---- eyes
++      const half = (TOP_Y - MID_Y) * -1; // 45.5
++      const topShift = cur.lidTop + (half - cur.lidTop) * blink;
++      const botShift = cur.lidBottom + (half - cur.lidBottom) * blink;
++      const topY = TOP_Y + topShift;
++      const botY = BOTTOM_Y - botShift;
++      let sideTop = SIDE_TOP + topShift;
++      let sideBot = SIDE_BOTTOM - botShift;
++      if (sideBot < sideTop) { const mid = (sideTop + sideBot) / 2; sideTop = mid; sideBot = mid; }
++
++      const eyeOpacity = 1 - cur.smile;
++      eyeGroups.forEach((g) => g.setAttribute('opacity', eyeOpacity.toFixed(3)));
++      smileGroups.forEach((g) => g.setAttribute('opacity', cur.smile.toFixed(3)));
++
++      tops.forEach((el) => { el.setAttribute('y1', topY.toFixed(2)); el.setAttribute('y2', topY.toFixed(2)); });
++      bottoms.forEach((el) => { el.setAttribute('y1', botY.toFixed(2)); el.setAttribute('y2', botY.toFixed(2)); });
++      [...lefts, ...rights].forEach((el) => { el.setAttribute('y1', sideTop.toFixed(2)); el.setAttribute('y2', sideBot.toFixed(2)); });
++
++      // pupils: gaze mapped inside the eye frame, kept clear of the lids
++      const dxPupil = -12 + ((gx + 1) / 2) * 36;
++      const rawDy = -24 + ((gy + 1) / 2) * 28;
++      const ps = cur.pupil;
++      const halfH = (12.5 * ps) * (1 - blink) + (PUPIL_W * ps) / 2;
++      const minC = topY + STROKE / 2 + 3 + halfH;
++      const maxC = botY - STROKE / 2 - 3 - halfH;
++      const centerY = clamp(PUPIL_REST_Y + rawDy, Math.min(minC, maxC), Math.max(minC, maxC));
++      const halfLen = 12.5 * ps * (1 - blink);
++      pupils.forEach((el, i) => {
++        const x = EYES[i].pupilX + dxPupil;
++        el.setAttribute('x1', x.toFixed(2)); el.setAttribute('x2', x.toFixed(2));
++        el.setAttribute('y1', (centerY - halfLen).toFixed(2));
++        el.setAttribute('y2', (centerY + halfLen).toFixed(2));
++        el.setAttribute('stroke-width', (PUPIL_W * ps).toFixed(2));
++        el.setAttribute('opacity', clamp(1 - blink * 1.3, 0, 1).toFixed(3));
++      });
++
++      // ---- brows
++      brows.forEach((el, i) => {
++        const rotB = i === 0 ? cur.browLeftRot : cur.browRightRot;
++        el.setAttribute('transform', `translate(${BROW_X[i]} ${(BROW_Y + cur.browY).toFixed(2)}) rotate(${rotB.toFixed(2)})`);
++        el.setAttribute('opacity', clamp(cur.brow, 0, 1).toFixed(3));
++      });
++
++      // ---- sparkles
++      sparkles.forEach((el, i) => {
++        const s = SPARKLES[i];
++        const pulse = Math.max(0, Math.sin(t * 2.2 + s.phase));
++        const size = s.size * cur.sparkle * (0.35 + pulse * 0.9) * 2.4;
++        el.setAttribute('transform', `translate(${s.x} ${s.y}) rotate(${(t * 25 + s.phase * 40).toFixed(1)}) scale(${size.toFixed(3)})`);
++        el.setAttribute('opacity', clamp(cur.sparkle * (0.3 + pulse * 0.7), 0, 1).toFixed(3));
++      });
++
++      raf = requestAnimationFrame(frame);
++    }
++    raf = requestAnimationFrame(frame);
++
++    return () => {
++      cancelAnimationFrame(raf);
++      window.removeEventListener('pointermove', onPointerMove);
++      window.removeEventListener('pointerdown', onPointerMove);
++    };
++  }, [pop]);
++
++  const spoken = label ?? `OllO looks ${mood === 'neutral' ? 'calm' : mood}`;
++
++  return (
++    <svg
++      ref={svgRef}
++      className={`ollo-mascot ${className}`}
++      viewBox="60 100 380 240"
++      role="img"
++      aria-label={spoken}
++      style={{ opacity: pop ? 0 : 1 }}
++      onPointerDown={() => reactRef.current(0.8)}
++    >
++      <g data-part="body" fill="none" stroke="currentColor" strokeWidth={STROKE} strokeLinecap="round" strokeLinejoin="round">
++        {EYES.map((eye, i) => (
++          <g key={i}>
++            <g data-part="eye">
++              <line data-part="top" x1={eye.topX1} x2={eye.topX2} y1={TOP_Y} y2={TOP_Y} />
++              <line data-part="bottom" x1={eye.topX1} x2={eye.topX2} y1={BOTTOM_Y} y2={BOTTOM_Y} />
++              <line data-part="side-left" x1={eye.left} x2={eye.left} y1={SIDE_TOP} y2={SIDE_BOTTOM} />
++              <line data-part="side-right" x1={eye.right} x2={eye.right} y1={SIDE_TOP} y2={SIDE_BOTTOM} />
++              <line data-part="pupil" x1={eye.pupilX} x2={eye.pupilX} y1={PUPIL_Y1} y2={PUPIL_Y2} strokeWidth={PUPIL_W} />
++            </g>
++            <g data-part="smile" opacity={0}>
++              <polyline points={`${eye.cx - 26} ${FACE_CY + 16} ${eye.cx} ${FACE_CY - 16} ${eye.cx + 26} ${FACE_CY + 16}`} />
++            </g>
++          </g>
++        ))}
++        <line x1={226.5} x2={226.5} y1={209.5} y2={301.5} />
++        <line x1={262} x2={262} y1={209.5} y2={301.5} />
++        {[0, 1].map((i) => (
++          <g key={i} data-part="brow" opacity={0}>
++            <line x1={-25} x2={25} y1={0} y2={0} />
++          </g>
++        ))}
++      </g>
++      {SPARKLES.map((_, i) => <path key={i} data-part="sparkle" d={SPARKLE_PATH} fill="currentColor" stroke="none" opacity={0} />)}
++    </svg>
++  );
++}
+diff --git a/ollo-app/src/mascot/mascot.css b/ollo-app/src/mascot/mascot.css
+new file mode 100644
+index 0000000..c3fa539
+--- /dev/null
++++ b/ollo-app/src/mascot/mascot.css
+@@ -0,0 +1,33 @@
++.ollo-mascot {
++  display: block;
++  width: clamp(150px, 42vw, 270px);
++  flex: 0 0 auto;
++  overflow: visible;
++  color: var(--cream, #fff4eb);
++  cursor: pointer;
++  user-select: none;
++  -webkit-tap-highlight-color: transparent;
++  touch-action: manipulation;
++}
++
++/* Quote text: every word floats a little out of step with its neighbours. */
++.floaty-quote { display: block; animation: quote-drift 7.5s ease-in-out infinite; }
++.floaty-word { display: inline-block; animation: word-in .55s cubic-bezier(.2, .9, .3, 1.25) both; animation-delay: calc(var(--i) * 70ms + 260ms); }
++.floaty-word > span { display: inline-block; animation: word-float 4.4s ease-in-out infinite; animation-delay: calc(var(--i) * -380ms); }
++
++@keyframes word-in {
++  from { opacity: 0; transform: translateY(14px) scale(.9); }
++  to { opacity: 1; transform: none; }
++}
++@keyframes word-float {
++  0%, 100% { transform: translateY(0); }
++  50% { transform: translateY(-3.5px); }
++}
++@keyframes quote-drift {
++  0%, 100% { transform: rotate(0deg) translate(0, 0); }
++  50% { transform: rotate(.7deg) translate(2px, -4px); }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .floaty-quote, .floaty-word, .floaty-word > span { animation: none; }
++}
+diff --git a/ollo-app/src/mascot/mood.ts b/ollo-app/src/mascot/mood.ts
+new file mode 100644
+index 0000000..7032021
+--- /dev/null
++++ b/ollo-app/src/mascot/mood.ts
+@@ -0,0 +1,76 @@
++import type { PracticeStats } from '../types';
++
++export type Mood = 'neutral' | 'happy' | 'proud' | 'sad' | 'angry';
++
++/**
++ * Tweak these to change how quickly ollo gets upset or proud.
++ * "Days" are calendar days in the user's local time zone.
++ */
++export const MOOD_RULES = {
++  /** Missed this many calendar days (no practice at all) -> sad */
++  sadAfterDays: 2,
++  /** Missed this many calendar days -> angry */
++  angryAfterDays: 3,
++  /** Cards studied today needed for ollo to be proud instead of just happy */
++  proudCardsToday: 10,
++  /** A streak of this many days in a row also makes ollo proud (if at least 1 card was studied today) */
++  proudStreakDays: 3
++} as const;
++
++export function dayKey(date: Date = new Date()): string {
++  const y = date.getFullYear();
++  const m = String(date.getMonth() + 1).padStart(2, '0');
++  const d = String(date.getDate()).padStart(2, '0');
++  return `${y}-${m}-${d}`;
++}
++
++function daysBetween(fromKey: string, toKey: string): number {
++  const [fy, fm, fd] = fromKey.split('-').map(Number);
++  const [ty, tm, td] = toKey.split('-').map(Number);
++  const from = Date.UTC(fy, fm - 1, fd);
++  const to = Date.UTC(ty, tm - 1, td);
++  return Math.round((to - from) / 86_400_000);
++}
++
++/** Returns the new stats after one card has been practiced. */
++export function recordPracticeStats(previous: PracticeStats | undefined, now: Date = new Date()): PracticeStats {
++  const today = dayKey(now);
++  if (previous && previous.lastDay === today) {
++    return { ...previous, lastAt: now.getTime(), todayCount: previous.todayCount + 1 };
++  }
++  const continuesStreak = previous ? daysBetween(previous.lastDay, today) === 1 : false;
++  return {
++    lastDay: today,
++    lastAt: now.getTime(),
++    todayCount: 1,
++    streak: continuesStreak && previous ? previous.streak + 1 : 1
++  };
++}
++
++/** Picks ollo's mood from how the user has been practicing. */
++export function moodFromPractice(stats: PracticeStats | undefined, now: Date = new Date()): Mood {
++  // Brand-new user: friendly and calm, nobody to be angry at yet.
++  if (!stats) return 'neutral';
++
++  const daysSince = daysBetween(stats.lastDay, dayKey(now));
++
++  if (daysSince <= 0) {
++    const proud = stats.todayCount >= MOOD_RULES.proudCardsToday || stats.streak >= MOOD_RULES.proudStreakDays;
++    return proud ? 'proud' : 'happy';
++  }
++  if (daysSince >= MOOD_RULES.angryAfterDays) return 'angry';
++  if (daysSince >= MOOD_RULES.sadAfterDays) return 'sad';
++  return 'neutral';
++}
++
++const VALID: Mood[] = ['neutral', 'happy', 'proud', 'sad', 'angry'];
++
++/** Dev helper: open the app with ?mood=angry to preview a mood without waiting days. */
++export function moodFromUrl(): Mood | undefined {
++  try {
++    const value = new URLSearchParams(window.location.search).get('mood');
++    return VALID.find((mood) => mood === value);
++  } catch {
++    return undefined;
++  }
++}
+diff --git a/ollo-app/src/styles.css b/ollo-app/src/styles.css
+index 9fc702e..d9c262a 100644
+--- a/ollo-app/src/styles.css
++++ b/ollo-app/src/styles.css
+@@ -42,7 +42,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .home-screen, .folder-screen, .study-screen, .editor-screen, .sync-screen, .settings-screen { position: relative; min-height: calc(100vh - 145px); padding-bottom: 105px; }
+ .motivation-row { min-height: 225px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 0 25px; }
+ .quote { flex: 1; color: var(--yellow); font-family: "Trebuchet MS", ui-monospace, monospace; font-size: clamp(20px, 4vw, 31px); letter-spacing: .05em; line-height: 1.42; transform: rotate(-2deg); max-width: 430px; }
+-.glasses-mark { width: clamp(90px, 23vw, 170px); color: var(--cream); flex: 0 0 auto; transform: rotate(6deg); }
+ .folder-list { display: flex; flex-direction: column; gap: 22px; padding-bottom: 70px; }
+ .folder-tile { border: 0; text-align: left; background: var(--surface); color: white; width: 100%; min-height: 98px; border-radius: 25px; box-shadow: 0 12px 15px #10101070; padding: 18px 24px; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+ .folder-tile strong { font-size: 24px; }
+@@ -131,7 +130,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
+ .settings-shortcut { pointer-events: auto; border: 0; background: transparent; color: #8a8a8a; font-size: 30px; width: 48px; height: 48px; display: grid; place-items: center; }
+ .empty-state { border: 1px dashed #686868; border-radius: 20px; padding: 30px 20px; color: #aaa; text-align: center; }
+ .toast { position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); width: max-content; max-width: calc(100% - 36px); z-index: 50; border-radius: 999px; background: var(--cream); color: #171717; box-shadow: 0 6px 20px #0008; padding: 12px 19px; font-size: 13px; text-align: center; }
+-.loading-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #aaa; }.loading-screen .glasses-mark { width: 130px; }
++.loading-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #aaa; }.loading-screen .ollo-mascot { width: 170px; }
+ 
+ @media (min-width: 760px) {
+   .app-shell { padding-top: 28px; }
+diff --git a/ollo-app/src/types.ts b/ollo-app/src/types.ts
+index 3148a0b..82de6a0 100644
+--- a/ollo-app/src/types.ts
++++ b/ollo-app/src/types.ts
+@@ -32,12 +32,24 @@ export interface AppSettings {
+   defaultImageMode: ImageMode;
+ }
+ 
++/** Tracks how the user has been practicing, so ollo can react to it. */
++export interface PracticeStats {
++  /** Local calendar day of the last practiced card, YYYY-MM-DD */
++  lastDay: string;
++  lastAt: number;
++  /** Unique cards practiced on lastDay */
++  todayCount: number;
++  /** Consecutive days practiced, ending at lastDay */
++  streak: number;
++}
++
+ export interface LibraryData {
+   cards: Card[];
+   settings: AppSettings;
+   /** Last card shown while studying, so Play can continue where the user left off. */
+   lastStudied?: { folder: string; cardId: string };
+   lastCardByFolder?: Record<string, string>;
++  practice?: PracticeStats;
+   lastSyncedAt?: number;
+   lastSyncedCounts?: { cards: number; images: number; folders: number };
+ }
