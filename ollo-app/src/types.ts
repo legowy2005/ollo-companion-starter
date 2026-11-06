@@ -35,6 +35,9 @@ export interface AppSettings {
 export interface LibraryData {
   cards: Card[];
   settings: AppSettings;
+  /** Last card shown while studying, so Play can continue where the user left off. */
+  lastStudied?: { folder: string; cardId: string };
+  lastCardByFolder?: Record<string, string>;
   lastSyncedAt?: number;
   lastSyncedCounts?: { cards: number; images: number; folders: number };
 }

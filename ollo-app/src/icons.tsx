@@ -34,3 +34,4 @@ export const FlipIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><path d=
 export const BluetoothIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><path d="M6.5 7.5 17 17l-5 5V2l5 5L6.5 16.5" /></Svg>;
 export const SettingsIcon = (p: IconProps) => <Svg {...p} strokeWidth={2}><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></Svg>;
 export const CloseIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M6 6l12 12M18 6 6 18" /></Svg>;
+export const ShuffleIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.2}><path d="M3 7h3.5c4 0 6 10 11 10H21M3 17h3.5c1.6 0 2.9-.8 4-2M13.5 9.2C14.7 7.9 16 7 17.5 7H21M18 4l3 3-3 3M18 14l3 3-3 3" /></Svg>;

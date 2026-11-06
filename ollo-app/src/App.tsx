@@ -6,7 +6,7 @@ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
 import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
 import { bleManager } from './ble/BleManager';
 import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
-import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, TrashIcon } from './icons';
+import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon } from './icons';
 import './styles.css';
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
@@ -44,6 +44,15 @@ function GlassesMark() {
   );
 }
 
+function shuffled<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export default function App() {
   const [library, setLibrary] = useState<LibraryData | null>(null);
   const [images, setImages] = useState<Map<number, StoredImage>>(new Map());
@@ -53,6 +62,10 @@ export default function App() {
   const [editorCard, setEditorCard] = useState<Card | null>(null);
   const [editorSide, setEditorSide] = useState<CardSide>('front');
   const [studyIndex, setStudyIndex] = useState(0);
+  // null = the selected folder in order; otherwise an explicit (random) order of card ids
+  const [studyIds, setStudyIds] = useState<string[] | null>(null);
+  const [studyFrom, setStudyFrom] = useState<'home' | 'folder'>('folder');
+  const [playScope, setPlayScope] = useState<'all' | 'folder' | null>(null);
   const [studyBack, setStudyBack] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [search, setSearch] = useState('');
@@ -138,7 +151,11 @@ export default function App() {
     });
   }, [library, folders, bookmarksOnly, search]);
   const folderCards = useMemo(() => library?.cards.filter((card) => card.folder === selectedFolder) ?? [], [library, selectedFolder]);
-  const studyCards = folderCards;
+  const studyCards = useMemo(() => {
+    if (!studyIds || !library) return folderCards;
+    const byId = new Map(library.cards.map((card) => [card.id, card]));
+    return studyIds.map((id) => byId.get(id)).filter((card): card is Card => !!card);
+  }, [studyIds, library, folderCards]);
   const activeStudyCard = studyCards[studyIndex];
   const activeStudyImageId = activeStudyCard ? (studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId) : undefined;
   const activeStudyImage = activeStudyImageId ? images.get(activeStudyImageId) : undefined;
@@ -150,6 +167,17 @@ export default function App() {
   const syncedCounts = library?.lastSyncedCounts ?? { cards: 0, images: 0, folders: 0 };
   const freeBytes = storageInfo ? Math.max(0, storageInfo.totalBytes - storageInfo.usedBytes) : undefined;
 
+  useEffect(() => {
+    if (screen !== 'study' || !activeStudyCard || !library) return;
+    const { id, folder } = activeStudyCard;
+    if (library.lastStudied?.cardId === id && library.lastCardByFolder?.[folder] === id) return;
+    updateLibrary((previous) => ({
+      ...previous,
+      lastStudied: { folder, cardId: id },
+      lastCardByFolder: { ...previous.lastCardByFolder, [folder]: id }
+    }));
+  }, [screen, activeStudyCard?.id]);
+
   function updateLibrary(updater: (previous: LibraryData) => LibraryData) {
     setLibrary((previous) => {
       if (!previous) return previous;
@@ -157,6 +185,43 @@ export default function App() {
       void saveLibrary(next);
       return next;
     });
+  }
+
+  /** The card to continue from. In a folder: that folder's last card. On home: the last card studied anywhere. */
+  function resumeCardFor(scope: 'all' | 'folder'): Card | undefined {
+    if (!library) return undefined;
+    if (scope === 'folder') {
+      const id = library.lastCardByFolder?.[selectedFolder];
+      return library.cards.find((card) => card.id === id && card.folder === selectedFolder);
+    }
+    return library.cards.find((card) => card.id === library.lastStudied?.cardId);
+  }
+
+  function startPlay(kind: 'continue' | 'random') {
+    if (!library || !playScope) return;
+    const scope = playScope;
+    setPlayScope(null);
+    setStudyBack(false);
+    setStudyFrom(scope === 'folder' ? 'folder' : 'home');
+
+    if (kind === 'random') {
+      const pool = scope === 'folder' ? library.cards.filter((card) => card.folder === selectedFolder) : library.cards;
+      if (!pool.length) { setNotice('There are no cards to study yet.'); return; }
+      setStudyIds(shuffled(pool.map((card) => card.id)));
+      setStudyIndex(0);
+      setScreen('study');
+      return;
+    }
+
+    // Continue: stay inside one folder (the one the user is in, or the one they left off in).
+    const resume = resumeCardFor(scope);
+    const folder = scope === 'folder' ? selectedFolder : (resume?.folder ?? folders[0]);
+    const cards = library.cards.filter((card) => card.folder === folder);
+    if (!folder || !cards.length) { setNotice('There are no cards to study yet.'); return; }
+    setSelectedFolder(folder);
+    setStudyIds(null);
+    setStudyIndex(Math.max(0, cards.findIndex((card) => card.id === resume?.id)));
+    setScreen('study');
   }
 
   function openFolder(folder: string) {
@@ -172,6 +237,7 @@ export default function App() {
 
   function openEditor(card: Card) {
     setSelectedCardId(card.id);
+    setSelectedFolder(card.folder);
     setEditorCard({ ...card });
     setEditorSide('front');
     setScreen('editor');
@@ -305,7 +371,8 @@ export default function App() {
 
   function navigateBack() {
     if (screen === 'folder' || screen === 'sync' || screen === 'settings') setScreen('home');
-    else if (screen === 'study' || screen === 'editor') setScreen('folder');
+    else if (screen === 'study') setScreen(studyFrom === 'home' ? 'home' : 'folder');
+    else if (screen === 'editor') setScreen('folder');
     else setScreen('home');
   }
 
@@ -347,7 +414,7 @@ export default function App() {
             })}
           </div>
           <div className="home-bottom-actions">
-            <button className="floating-play" onClick={() => { if (folders.length) { setSelectedFolder(folders[0]); setStudyIndex(0); setStudyBack(false); setScreen('study'); } }} aria-label="Start studying"><PlayIcon /></button>
+            <button className="floating-play" onClick={() => { if (library.cards.length) setPlayScope('all'); else setNotice('Add a flashcard first.'); }} aria-label="Start studying"><PlayIcon /></button>
             <button className="settings-shortcut" onClick={() => setScreen('settings')} aria-label="Settings"><SettingsIcon /></button>
             <button className="floating-add" onClick={() => {
               const folder = window.prompt('Folder name for the new card', selectedFolder || 'OllO')?.trim();
@@ -366,11 +433,11 @@ export default function App() {
             <div className="folder-management-bottom"><span>{folderCards.length} cards</span><span className="synced-label">{library.lastSyncedAt ? 'Synced' : 'Not synced'}</span></div>
           </div>
           <div className="folder-card-list">
-            {folderCards.map((card) => <button className="flashcard-preview" key={card.id} onClick={() => { setSelectedCardId(card.id); setStudyIndex(folderCards.findIndex((item) => item.id === card.id)); setStudyBack(false); setScreen('study'); }}>
+            {folderCards.map((card) => <button className="flashcard-preview" key={card.id} onClick={() => { setSelectedCardId(card.id); setStudyIds(null); setStudyFrom('folder'); setStudyIndex(folderCards.findIndex((item) => item.id === card.id)); setStudyBack(false); setScreen('study'); }}>
               {card.frontImageId && images.get(card.frontImageId) ? <img src={displaySrc(images.get(card.frontImageId)!)} alt="Card front" /> : <span>{card.front || 'Untitled card'}</span>}
             </button>)}
           </div>
-          <div className="home-bottom-actions"><button className="floating-play" onClick={() => { setStudyIndex(0); setStudyBack(false); setScreen('study'); }} aria-label="Study folder"><PlayIcon /></button><button className="floating-add" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button></div>
+          <div className="home-bottom-actions"><button className="floating-play" onClick={() => { if (folderCards.length) setPlayScope('folder'); else setNotice('Add a flashcard first.'); }} aria-label="Study folder"><PlayIcon /></button><button className="floating-add" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button></div>
         </section>
       )}
 
@@ -458,6 +525,21 @@ export default function App() {
         </section>
       )}
 
+      {playScope && (() => {
+        const pool = playScope === 'folder' ? library.cards.filter((card) => card.folder === selectedFolder) : library.cards;
+        const resume = resumeCardFor(playScope);
+        const resumeFolderCards = resume ? library.cards.filter((card) => card.folder === resume.folder) : [];
+        const resumeText = resume
+          ? `${playScope === 'all' ? `${resume.folder} · ` : ''}card ${resumeFolderCards.findIndex((card) => card.id === resume.id) + 1} of ${resumeFolderCards.length}`
+          : 'Starts at the first card';
+        return <div className="modal-backdrop" onClick={() => setPlayScope(null)} role="dialog" aria-label="Start studying"><div className="image-picker-modal play-chooser" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-title">Start studying</div>
+          <p>{playScope === 'folder' ? selectedFolder : 'All folders'}</p>
+          <button className="play-option" disabled={!pool.length} onClick={() => startPlay('continue')}><span className="play-option-icon"><PlayIcon /></span><span><strong>Where I left off</strong><small>{resumeText}</small></span></button>
+          <button className="play-option" disabled={!pool.length} onClick={() => startPlay('random')}><span className="play-option-icon"><ShuffleIcon /></span><span><strong>Random card</strong><small>{playScope === 'folder' ? `Shuffled from ${selectedFolder}` : 'Shuffled from all folders'}</small></span></button>
+          <div className="modal-actions"><button className="soft-button" onClick={() => setPlayScope(null)}>Cancel</button></div>
+        </div></div>;
+      })()}
       {viewerSrc && <div className="image-viewer" onClick={() => setViewerSrc(undefined)} role="dialog" aria-label="Full screen image"><button className="viewer-close" onClick={() => setViewerSrc(undefined)} aria-label="Close"><CloseIcon /></button><img src={viewerSrc} alt="Full screen card" /></div>}
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
