@@ -1,0 +1,598 @@
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+index b74bd3e..4f89c0a 100644
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -6,12 +6,12 @@ import { getAllImages, loadLibrary, saveImage, saveLibrary } from './storage';
+ import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+ import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
+-import { ArrowLeftIcon, BluetoothIcon, BoltIcon, BookmarkIcon, ChevronRightIcon, CloseIcon, GlassesIcon, ImageIcon, LibraryIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon, UndoIcon } from './icons';
++import { ArrowLeftIcon, BluetoothIcon, BookmarkIcon, ChevronRightIcon, CloseIcon, GlassesIcon, ImageIcon, LibraryIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon, UndoIcon } from './icons';
+ import { Mascot } from './mascot/Mascot';
+ import { FloatyText } from './mascot/FloatyText';
+ import { MOOD_LABELS, dayKey, moodFromUrl, recordPracticeStats } from './mascot/mood';
+ import { DIRECTOR_RULES, eggDisplay, handleAppOpen, quoteDisplay, resolveQuoteOfTheDay, type Display } from './mascot/director';
+-import { DAY, GRADE_LABELS, countCards, dueLabel, endOfToday, formatWait, isNewCard, legacyRating, previewWaits, schedule, type DeckCounts } from './study/scheduler';
++import { DAY, GRADE_LABELS, countCards, endOfToday, formatWait, legacyRating, schedule, type DeckCounts } from './study/scheduler';
+ import { applyGrade, recallRate, shuffled, smartQueue, startSession, type Session, type SessionMode } from './study/session';
+ import { activeStreak, cardsToday, recordHistory, weekStrip } from './study/progress';
+ import { Lens, MasteryBar, Switch, WeekStrip } from './ui/parts';
+@@ -34,6 +34,11 @@ interface UndoSnapshot {
+ }
+ 
+ const GOAL_CHOICES = [5, 10, 20, 30];
++/** A session is a small bite (about 5 cards). The day's work is split into bites so it feels easy to start. */
++const SECTION_CARDS = 5;
++function sectionSize(total: number): number {
++  return total <= 0 ? 0 : Math.ceil(total / Math.ceil(total / SECTION_CARDS));
++}
+ const NO_CARDS: Card[] = [];
+ 
+ function newCard(folder = 'OllO'): Card {
+@@ -76,6 +81,9 @@ export default function App() {
+   const [session, setSession] = useState<Session | null>(null);
+   const [finished, setFinished] = useState<Session | null>(null);
+   const [revealed, setRevealed] = useState(false);
++  /** True once the answer has been seen for the current card, so the grade buttons stay even if the card is flipped back. */
++  const [peeked, setPeeked] = useState(false);
++  const [showAddSheet, setShowAddSheet] = useState(false);
+   const [undoSnap, setUndoSnap] = useState<UndoSnapshot | null>(null);
+   const [playScope, setPlayScope] = useState<'all' | 'folder' | null>(null);
+   const [showSearch, setShowSearch] = useState(false);
+@@ -169,17 +177,18 @@ export default function App() {
+ 
+   // Escape closes whichever overlay is on top.
+   useEffect(() => {
+-    if (!viewerSrc && !dialog && !playScope && !showImagePicker) return;
++    if (!viewerSrc && !dialog && !playScope && !showImagePicker && !showAddSheet) return;
+     const onKey = (event: KeyboardEvent) => {
+       if (event.key !== 'Escape') return;
+       if (viewerSrc) setViewerSrc(undefined);
+       else if (dialog) setDialog(null);
+       else if (playScope) setPlayScope(null);
++      else if (showAddSheet) setShowAddSheet(false);
+       else closeImagePicker();
+     };
+     window.addEventListener('keydown', onKey);
+     return () => window.removeEventListener('keydown', onKey);
+-  }, [viewerSrc, dialog, playScope, showImagePicker]);
++  }, [viewerSrc, dialog, playScope, showImagePicker, showAddSheet]);
+ 
+   useEffect(() => {
+     if (!notice) return;
+@@ -252,17 +261,22 @@ export default function App() {
+     return map;
+   }, [allCards, folders, nowMs]);
+   const homeFolders = useMemo(() => {
+-    const term = search.toLowerCase();
++    const term = search.trim().toLowerCase();
+     return folders.filter((folder) => {
+-      const inFolder = allCards.filter((card) => card.folder === folder);
+-      const matches = !bookmarksOnly || inFolder.some((card) => card.bookmarked);
+-      const searchMatch = !term || folder.toLowerCase().includes(term) || inFolder.some((card) => `${card.front} ${card.back}`.toLowerCase().includes(term));
+-      return matches && searchMatch;
++      const matches = !bookmarksOnly || allCards.some((card) => card.folder === folder && card.bookmarked);
++      return matches && (!term || folder.toLowerCase().includes(term));
+     });
+   }, [allCards, folders, bookmarksOnly, search]);
++  const searchCards = useMemo(() => {
++    const term = search.trim().toLowerCase();
++    if (!term) return NO_CARDS;
++    return allCards.filter((card) => (!bookmarksOnly || card.bookmarked) && `${card.front} ${card.back}`.toLowerCase().includes(term)).slice(0, 50);
++  }, [allCards, bookmarksOnly, search]);
+   const folderCards = useMemo(() => allCards.filter((card) => card.folder === selectedFolder), [allCards, selectedFolder]);
+-  const todayQueue = useMemo(() => smartQueue(allCards, { size: goal, now: nowMs }), [allCards, goal, nowMs]);
+-  const folderQueue = useMemo(() => smartQueue(allCards, { size: goal, now: nowMs, folder: selectedFolder }), [allCards, goal, nowMs, selectedFolder]);
++  const todayAll = useMemo(() => smartQueue(allCards, { size: goal, now: nowMs }), [allCards, goal, nowMs]);
++  const todayQueue = useMemo(() => todayAll.slice(0, sectionSize(todayAll.length)), [todayAll]);
++  const folderAll = useMemo(() => smartQueue(allCards, { size: goal, now: nowMs, folder: selectedFolder }), [allCards, goal, nowMs, selectedFolder]);
++  const folderQueue = useMemo(() => folderAll.slice(0, sectionSize(folderAll.length)), [folderAll]);
+   const studyCard = session ? cardsById.get(session.queue[0]) : undefined;
+   const faceImage = (card: Card | undefined, side: CardSide): StoredImage | undefined => {
+     const id = card ? (side === 'front' ? card.frontImageId : card.backImageId) : undefined;
+@@ -330,6 +344,7 @@ export default function App() {
+     setFinished(null);
+     setUndoSnap(null);
+     setRevealed(false);
++    setPeeked(false);
+     setStudyFrom(from);
+     setScreen('study');
+   }
+@@ -339,14 +354,16 @@ export default function App() {
+     if (!library) return;
+     const folder = scope === 'folder' ? selectedFolder : undefined;
+     seenIds.current = new Set();
+-    const ids = smartQueue(library.cards, { size: library.settings.dailyGoal, now: Date.now(), folder });
++    const all = smartQueue(library.cards, { size: library.settings.dailyGoal, now: Date.now(), folder });
++    const ids = all.slice(0, sectionSize(all.length));
+     if (!ids.length) { setPlayScope(scope); return; }
+     openSession('smart', ids, scope === 'folder' ? 'folder' : 'home', folder);
+   }
+ 
+   function keepGoing() {
+     if (!library) return;
+-    const ids = smartQueue(library.cards, { size: library.settings.dailyGoal, now: Date.now(), folder: finished?.folder, exclude: seenIds.current });
++    const all = smartQueue(library.cards, { size: library.settings.dailyGoal, now: Date.now(), folder: finished?.folder, exclude: seenIds.current });
++    const ids = all.slice(0, sectionSize(all.length));
+     if (!ids.length) { setNotice('Nothing else is ready. Nice work.'); setScreen(studyFrom === 'folder' ? 'folder' : 'home'); return; }
+     openSession('smart', ids, studyFrom, finished?.folder);
+   }
+@@ -379,12 +396,24 @@ export default function App() {
+     openSession('resume', inFolder.slice(start).map((card) => card.id), scope === 'folder' ? 'folder' : 'home', folder);
+   }
+ 
+-  function reveal() {
+-    if (studyCard && !revealed) setRevealed(true);
++  /** Tap the card to see the other side. Tap again to go back. */
++  function toggleFace() {
++    if (!studyCard) return;
++    if (!revealed) setPeeked(true);
++    setRevealed(!revealed);
++  }
++
++  /** Opens a card in learning mode: the folder in order, starting at this card. Practice only. */
++  function openCardInLearning(card: Card, from: 'home' | 'folder') {
++    if (!library) return;
++    const inFolder = library.cards.filter((item) => item.folder === card.folder);
++    const start = Math.max(0, inFolder.findIndex((item) => item.id === card.id));
++    setSelectedFolder(card.folder);
++    openSession('resume', inFolder.slice(start).map((item) => item.id), from, card.folder);
+   }
+ 
+   function gradeCard(grade: Grade) {
+-    if (!library || !session || !studyCard || !revealed) return;
++    if (!library || !session || !studyCard || !peeked) return;
+     const now = Date.now();
+     const card = studyCard;
+     // Practice runs (shuffle / where I left off) never move the schedule.
+@@ -408,6 +437,7 @@ export default function App() {
+     const next = applyGrade(session, grade, nextSched, now);
+     setSession(next);
+     setRevealed(false);
++    setPeeked(false);
+     if (!next.queue.length) {
+       setFinished(next);
+       setUndoSnap(null);
+@@ -427,16 +457,26 @@ export default function App() {
+     setSession(snap.session);
+     setUndoSnap(null);
+     setRevealed(false);
++    setPeeked(false);
+   }
+ 
+   function exitStudy() {
+     setScreen(studyFrom === 'folder' ? 'folder' : 'home');
+   }
+ 
+-  keyHandlers.current = { reveal, grade: gradeCard, undo: undoGrade, exit: exitStudy };
++  keyHandlers.current = { reveal: toggleFace, grade: gradeCard, undo: undoGrade, exit: exitStudy };
+ 
+   // ───────── Library & editor ─────────
+ 
++  function askNewFolder() {
++    askText('New folder', 'Folder name', '', 'Create', (value) => {
++      const name = value.trim();
++      if (!name) return;
++      if (byteLength(name) > MAX_FOLDER_BYTES) { setNotice('Folder names must be 20 UTF-8 bytes or fewer.'); return; }
++      startNewCard(name);
++    });
++  }
++
+   function openFolder(folder: string) {
+     setSelectedFolder(folder);
+     setScreen('folder');
+@@ -632,21 +672,13 @@ export default function App() {
+   function renderHome() {
+     const lib = library!;
+     const queued = todayQueue.length;
+-    const fresh = todayQueue.filter((id) => { const card = cardsById.get(id); return card && isNewCard(card); }).length;
+-    const reviewing = queued - fresh;
+     const minutes = Math.max(1, Math.round(queued * 0.25));
+     const upcoming = lib.cards.filter((card) => card.sched && card.sched.due > now).map((card) => card.sched!.due).sort((a, b) => a - b)[0];
+     let headline: string;
+     let sub: string;
+     if (!lib.cards.length) { headline = 'Make your first card'; sub = 'Cards you write here show up on your glasses too.'; }
+     else if (!queued) { headline = 'You’re all caught up'; sub = upcoming ? `Your next card comes back in ${formatWait(upcoming - now)}.` : 'Come back later and the cards will be waiting.'; }
+-    else if (goalMet) { headline = 'Daily goal reached'; sub = `${plural(queued, 'more card')} ready if you want to keep going.`; }
+-    else {
+-      headline = `${plural(queued, 'card')} to study`;
+-      sub = [fresh ? `${fresh} new` : '', reviewing ? `${reviewing} to review` : '', `about ${plural(minutes, 'min')}`].filter(Boolean).join(' · ');
+-    }
+-    const cta = !lib.cards.length ? 'Add a card' : !queued ? 'Practice anyway' : goalMet ? 'Keep going' : 'Start session';
+-    const onCta = () => { if (!lib.cards.length) startNewCard(); else if (!queued) setPlayScope('all'); else startSmart('all'); };
++    else { headline = plural(queued, 'card'); sub = `about ${plural(minutes, 'min')}`; }
+ 
+     return (
+       <section>
+@@ -660,22 +692,15 @@ export default function App() {
+             <Lens value={doneToday} goal={goal} />
+             <div className="today-copy"><h2>{headline}</h2><p>{sub}</p></div>
+           </div>
+-          <button className="btn primary block" onClick={onCta}><PlayIcon />{cta}</button>
+-          <div className="today-foot">
+-            <WeekStrip days={weekStrip(lib.history, new Date(now))} />
+-            {queued > 0 && <button className="link-btn" onClick={() => setPlayScope('all')}>Other ways</button>}
+-          </div>
++          <WeekStrip days={weekStrip(lib.history, new Date(now))} />
+         </div>
+ 
+-        <div className="section-head">
+-          <h2>Library</h2>
+-          <div className="filters">
+-            <button className="chip filter-chip" aria-pressed={!bookmarksOnly} onClick={() => setBookmarksOnly(false)}>All</button>
+-            <button className="chip filter-chip" aria-pressed={bookmarksOnly} onClick={() => setBookmarksOnly(true)}>Saved</button>
+-          </div>
++        <div className="filters list-filters">
++          <button className="chip filter-chip" aria-pressed={!bookmarksOnly} onClick={() => setBookmarksOnly(false)}>All</button>
++          <button className="chip filter-chip" aria-pressed={bookmarksOnly} onClick={() => setBookmarksOnly(true)}>Saved</button>
+         </div>
+         <div className="folder-list">
+-          {homeFolders.length === 0 ? (
++          {homeFolders.length === 0 && searchCards.length === 0 ? (
+             <div className="empty">
+               <strong>{bookmarksOnly ? 'No saved cards yet' : search ? 'Nothing matches that' : 'No folders yet'}</strong>
+               {bookmarksOnly ? 'Tap the bookmark while studying to keep a card here.' : search ? 'Try a different word.' : 'Add a card and its folder appears here.'}
+@@ -685,46 +710,59 @@ export default function App() {
+             return (
+               <button className="folder-row" key={folder} onClick={() => openFolder(folder)}>
+                 <span className="folder-name">{folder}</span>
+-                <span className="folder-side">{counts.due > 0 && <span className="due-badge">{counts.due} due</span>}<ChevronRightIcon /></span>
++                <span className="folder-side"><ChevronRightIcon /></span>
+                 <span className="folder-meta"><MasteryBar counts={counts} /><span>{plural(counts.total, 'card')}</span></span>
+               </button>
+             );
+           })}
+         </div>
+-        <button className="fab" onClick={() => startNewCard(folders.includes(selectedFolder) ? selectedFolder : folders[0])} aria-label="Add flashcard"><PlusIcon /></button>
++        {searchCards.length > 0 && (
++          <>
++            <h2 className="sub-head">Cards</h2>
++            <div className="card-list">
++              {searchCards.map((card) => (
++                <button className="card-row" key={card.id} onClick={() => openCardInLearning(card, 'home')}>
++                  <span className="q">{card.front || (card.frontImageId ? 'Image card' : 'Untitled card')}</span>
++                  <span className="a">{card.back || (card.backImageId ? 'Image answer' : 'No answer yet')}</span>
++                  <span className="state">{card.folder}</span>
++                </button>
++              ))}
++            </div>
++          </>
++        )}
++        <div className="dock">
++          <button className="fab" onClick={() => (folders.length ? setShowAddSheet(true) : askNewFolder())} aria-label="Add flashcard"><PlusIcon /></button>
++          <button className="start-btn" onClick={() => setPlayScope('all')} disabled={!lib.cards.length}><PlayIcon />Start session</button>
++        </div>
+       </section>
+     );
+   }
+ 
+   function renderFolder() {
+     const counts = folderCounts.get(selectedFolder) ?? countCards(folderCards, now);
+-    const ready = folderQueue.length;
+     return (
+       <section>
+         <div className="folder-head">
+           <h1>{selectedFolder}</h1>
+-          <div className="folder-facts">
+-            <span>{plural(counts.total, 'card')}</span>
+-            {counts.due > 0 && <span>{counts.due} due</span>}
+-            {counts.new > 0 && <span>{counts.new} new</span>}
+-            {counts.mature > 0 && <span className="ok">{counts.mature} known</span>}
+-          </div>
++          <div className="folder-facts"><span>{plural(counts.total, 'card')}</span></div>
+           <MasteryBar counts={counts} />
+           <div className="legend">
+             <span><i className="m-mature" />Known</span><span><i className="m-young" />Getting there</span><span><i className="m-learning" />Learning</span><span><i className="m-new" />New</span>
+           </div>
+-          <button className="btn primary block" onClick={() => startSmart('folder')} disabled={!counts.total}><PlayIcon />{ready ? `Study ${plural(ready, 'card')}` : 'Practice this folder'}</button>
+         </div>
+         <div className="card-list">
+           {folderCards.map((card) => (
+-            <button className="card-row" key={card.id} onClick={() => openEditor(card, 'folder')}>
++            <button className="card-row" key={card.id} onClick={() => openCardInLearning(card, 'folder')}>
+               <span className="q">{card.front || (card.frontImageId ? 'Image card' : 'Untitled card')}</span>
+               <span className="a">{card.back || (card.backImageId ? 'Image answer' : 'No answer yet')}</span>
+-              <span className={`state ${dueLabel(card, now) === 'Due' ? 'due' : ''}`}>{card.bookmarked && <BookmarkIcon />}{dueLabel(card, now)}</span>
++              {card.bookmarked && <span className="state"><BookmarkIcon /></span>}
+             </button>
+           ))}
+         </div>
+-        <button className="fab" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button>
++        <div className="dock">
++          <button className="fab" onClick={() => startNewCard(selectedFolder)} aria-label="Add flashcard"><PlusIcon /></button>
++          <button className="start-btn" onClick={() => setPlayScope('folder')} disabled={!counts.total}><PlayIcon />Start session</button>
++        </div>
+       </section>
+     );
+   }
+@@ -737,7 +775,11 @@ export default function App() {
+       <div
+         className={`face ${side}`}
+         aria-hidden={hidden}
+-        {...(side === 'front' ? { role: 'button', tabIndex: revealed ? -1 : 0, onClick: reveal, onKeyDown: (event: ReactKeyboardEvent) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); reveal(); } }, 'aria-label': 'Question. Activate to show the answer.' } : {})}
++        role="button"
++        tabIndex={hidden ? -1 : 0}
++        aria-label={side === 'front' ? 'Question. Activate to show the answer.' : 'Answer. Activate to show the question.'}
++        onClick={toggleFace}
++        onKeyDown={(event: ReactKeyboardEvent) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleFace(); } }}
+       >
+         <span className="face-tag">{side === 'front' ? 'Question' : 'Answer'}</span>
+         <div className="face-body">
+@@ -750,8 +792,6 @@ export default function App() {
+ 
+   function renderStudy() {
+     if (!session || !studyCard) return <div className="empty"><strong>This session is empty</strong><button className="btn quiet" onClick={exitStudy}>Back</button></div>;
+-    const smart = session.mode === 'smart';
+-    const waits = smart ? previewWaits(studyCard.sched, now) : undefined;
+     const shown = Math.min(session.total, session.done + 1);
+     return (
+       <section className="study">
+@@ -761,7 +801,7 @@ export default function App() {
+           <span className="study-count">{shown} / {session.total}</span>
+         </div>
+         <div className="study-meta">
+-          <span className="where"><b>{studyCard.folder}</b><span className="tag">{smart ? dueLabel(studyCard, now) : 'Practice'}</span></span>
++          <span className="where"><b>{studyCard.folder}</b></span>
+           <button className={`icon-btn plain ${studyCard.bookmarked ? 'on' : ''}`} onClick={() => toggleBookmark(studyCard.id)} aria-label={studyCard.bookmarked ? 'Remove bookmark' : 'Bookmark card'} aria-pressed={!!studyCard.bookmarked}><BookmarkIcon /></button>
+           <button className="icon-btn plain" onClick={() => openEditor(studyCard, 'study')} aria-label="Edit card"><PencilIcon /></button>
+         </div>
+@@ -772,25 +812,21 @@ export default function App() {
+           </div>
+         </div>
+         <div className="study-actions">
+-          {!revealed ? (
++          {!peeked ? (
+             <>
+-              <button className="btn primary block" onClick={reveal}>Show answer</button>
++              <button className="btn primary block" onClick={toggleFace}>Show answer</button>
+               <p className="reveal-hint">Say it or picture it first. Remembering is what makes it stick.</p>
+             </>
+           ) : (
+             <div className="grades" role="group" aria-label="How well did you remember?">
+-              {([1, 2, 3, 4] as const).map((grade) => (
+-                <button key={grade} className={`grade g${grade}`} onClick={() => gradeCard(grade)}>
+-                  <kbd aria-hidden="true">{grade}</kbd>
+-                  {GRADE_LABELS[grade]}
+-                  {waits && <small>{waits[grade]}</small>}
+-                </button>
++              {([4, 3, 2, 1] as const).map((grade) => (
++                <button key={grade} className={`grade g${grade}`} onClick={() => gradeCard(grade)}>{GRADE_LABELS[grade]}</button>
+               ))}
+             </div>
+           )}
+           <div className="study-foot">{undoSnap && <button className="link-btn" onClick={undoGrade}><UndoIcon style={{ verticalAlign: '-3px', marginRight: 6 }} />Undo last answer</button>}</div>
+         </div>
+-        <p className="sr-only" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{revealed ? 'Answer shown. Choose how well you remembered.' : ''}</p>
++        <p className="sr-only" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{revealed ? 'Answer shown.' : ''}</p>
+       </section>
+     );
+   }
+@@ -868,17 +904,10 @@ export default function App() {
+   function renderEditor() {
+     const card = editorCard!;
+     const isNew = !library!.cards.some((item) => item.id === card.id);
+-    const folderBytes = byteLength(card.folder);
+     return (
+       <section className="editor">
+         {renderSide('front')}
+         {renderSide('back')}
+-        <div className="folder-pick">
+-          <span className="side-label">Folder</span>
+-          {folders.length > 0 && <div className="chips" role="group" aria-label="Existing folders">{folders.map((name) => <button key={name} className="chip" aria-pressed={card.folder === name} onClick={() => setEditorCard({ ...card, folder: name })}>{name}</button>)}</div>}
+-          <input className="input" value={card.folder} aria-label="Folder name" placeholder="Or type a new folder name" aria-invalid={folderBytes > MAX_FOLDER_BYTES} onChange={(event) => setEditorCard({ ...card, folder: event.target.value })} maxLength={40} />
+-          <span className={`field-help ${folderBytes > MAX_FOLDER_BYTES ? 'warn' : ''}`}>{folderBytes > MAX_FOLDER_BYTES ? `Too long for the glasses: ${folderBytes} of ${MAX_FOLDER_BYTES} bytes.` : 'Folders sort your cards, on the glasses too.'}</span>
+-        </div>
+         <div className="editor-actions">
+           <button className="btn primary block" onClick={() => saveEditor(false)}>Save card</button>
+           {isNew && <button className="btn quiet block" onClick={() => saveEditor(true)}>Save and add another</button>}
+@@ -901,7 +930,7 @@ export default function App() {
+               <span className={`device-state ${live ? 'live' : busy ? 'busy' : ''}`}>{live ? 'Connected' : busy ? 'Connecting…' : 'Not connected'}</span>
+             </div>
+           </div>
+-          <p className="device-note">{connectionMessage}</p>
++          {connectionMessage.trim().replace(/…|\.+$/g, '').toLowerCase() !== (live ? 'connected' : busy ? 'connecting' : 'not connected') && <p className="device-note">{connectionMessage}</p>}
+           <div className="meter">
+             <div className="meter-label"><span>Free space on glasses</span><strong>{freeBytes === undefined ? '—' : `${formatBytes(freeBytes)} of ${formatBytes(storageInfo?.totalBytes)}`}</strong></div>
+             <div className="meter-track"><i style={{ width: storageInfo && storageInfo.totalBytes ? `${Math.min(100, storageInfo.usedBytes / storageInfo.totalBytes * 100)}%` : '0%' }} /></div>
+@@ -1021,7 +1050,6 @@ export default function App() {
+             <header className="topbar">
+               {screen === 'home' ? (
+                 <>
+-                  <div className={`chip streak ${streak.practicedToday ? '' : 'idle'}`} title={streak.atRisk ? 'Study one card today to keep your streak' : undefined}><BoltIcon />{streak.days > 0 ? `${streak.days}-day streak` : 'Start a streak'}</div>
+                   <span className="topbar-spacer" />
+                   <button className={`chip ${needsSync ? 'attn' : ''}`} onClick={() => setScreen('sync')} aria-label="Glasses status"><span className={`pip ${connection === 'connected' ? 'live' : connection === 'connecting' ? 'busy' : ''}`} />{needsSync ? 'Sync' : connection === 'connected' ? 'Connected' : 'Glasses'}</button>
+                   <button className={`icon-btn ${showSearch ? 'on' : ''}`} onClick={() => { setShowSearch((value) => !value); if (showSearch) setSearch(''); }} aria-label="Search" aria-pressed={showSearch}><SearchIcon /></button>
+@@ -1050,6 +1078,7 @@ export default function App() {
+ 
+       {playScope && (() => {
+         const pool = playScope === 'folder' ? library.cards.filter((card) => card.folder === selectedFolder) : library.cards;
++        const queue = playScope === 'folder' ? folderQueue : todayQueue;
+         const resume = resumeCardFor(playScope);
+         const resumeFolderCards = resume ? library.cards.filter((card) => card.folder === resume.folder) : [];
+         const resumeText = resume
+@@ -1057,9 +1086,10 @@ export default function App() {
+           : 'Starts at the first card';
+         return (
+           <div className="backdrop" onClick={() => setPlayScope(null)}>
+-            <div className="sheet" role="dialog" aria-modal="true" aria-label="Practice" onClick={(event) => event.stopPropagation()}>
+-              <h2>Practice</h2>
+-              <p>{playScope === 'folder' ? selectedFolder : 'All folders'}. Practice doesn’t change when cards come back.</p>
++            <div className="sheet" role="dialog" aria-modal="true" aria-label="Start session" onClick={(event) => event.stopPropagation()}>
++              <h2>Start session</h2>
++              <p>{playScope === 'folder' ? selectedFolder : 'All folders'}</p>
++              {queue.length > 0 && <button className="choice primary-choice" onClick={() => { setPlayScope(null); startSmart(playScope); }}><span className="choice-icon"><PlayIcon /></span><span><strong>Study {plural(queue.length, 'card')}</strong><small>Picked for you · about {plural(Math.max(1, Math.round(queue.length * 0.25)), 'min')}</small></span></button>}
+               <button className="choice" disabled={!pool.length} onClick={() => startPractice('resume')}><span className="choice-icon"><PlayIcon /></span><span><strong>Where I left off</strong><small>{resumeText}</small></span></button>
+               <button className="choice" disabled={!pool.length} onClick={() => startPractice('shuffle')}><span className="choice-icon"><ShuffleIcon /></span><span><strong>Shuffle</strong><small>{playScope === 'folder' ? `Random order from ${selectedFolder}` : 'Random order from every folder'}</small></span></button>
+               <div className="sheet-actions"><button className="btn quiet" onClick={() => setPlayScope(null)}>Cancel</button></div>
+@@ -1068,6 +1098,17 @@ export default function App() {
+         );
+       })()}
+ 
++      {showAddSheet && (
++        <div className="backdrop" onClick={() => setShowAddSheet(false)}>
++          <div className="sheet" role="dialog" aria-modal="true" aria-label="Add a card" onClick={(event) => event.stopPropagation()}>
++            <h2>Add a card to…</h2>
++            {folders.map((name) => <button key={name} className="choice" onClick={() => { setShowAddSheet(false); startNewCard(name); }}><span className="choice-icon"><LibraryIcon /></span><span><strong>{name}</strong><small>{plural(folderCounts.get(name)?.total ?? 0, 'card')}</small></span></button>)}
++            <button className="choice" onClick={() => { setShowAddSheet(false); askNewFolder(); }}><span className="choice-icon"><PlusIcon /></span><span><strong>New folder</strong></span></button>
++            <div className="sheet-actions"><button className="btn quiet" onClick={() => setShowAddSheet(false)}>Cancel</button></div>
++          </div>
++        </div>
++      )}
++
+       {showImagePicker && (
+         <div className="backdrop" onClick={closeImagePicker}>
+           <div className="sheet" role="dialog" aria-modal="true" aria-label="Add image" onClick={(event) => event.stopPropagation()}>
+diff --git a/ollo-app/src/mascot/Mascot.tsx b/ollo-app/src/mascot/Mascot.tsx
+index aa3ed2d..8b9931d 100644
+--- a/ollo-app/src/mascot/Mascot.tsx
++++ b/ollo-app/src/mascot/Mascot.tsx
+@@ -3,7 +3,7 @@ import type { Mood } from './mood';
+ import './mascot.css';
+ 
+ /**
+- * The OllO mascot. (Sparkle particles and the springy start-up wobble were removed on purpose.)
++ * The OllO mascot. (Sparkle particles, the start-up wobble and any shaking when an emotion begins were removed on purpose.)
+  *
+  * Geometry comes straight from the supplied mascot art (500x500 PNGs): every eye is four rounded bars
+  * plus a pill-shaped pupil, with two vertical bars in the middle and optional eyebrows.
+@@ -93,12 +93,9 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+   const svgRef = useRef<SVGSVGElement>(null);
+   const moodRef = useRef<Mood>(mood);
+   const reactRef = useRef<(strength: number) => void>(() => {});
+-  const firstMood = useRef(true);
+ 
+   useEffect(() => {
+     moodRef.current = mood;
+-    if (firstMood.current) { firstMood.current = false; return; }
+-    reactRef.current(1);
+   }, [mood]);
+ 
+   useEffect(() => {
+@@ -132,7 +129,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+     let spring = 0, springV = 0;      // squash & stretch for taps and mood changes
+     let nextHop = 3.2;
+     let hopStart = -99;
+-    let shakeUntil = 0;
+     let startT = -1;
+     let last = 0;
+     let raf = 0;
+@@ -141,7 +137,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+     reactRef.current = (strength: number) => {
+       springV += 7 * strength;
+       blinkUntil = performance.now() / 1000 + 0.12;
+-      if (moodRef.current === 'angry') shakeUntil = performance.now() / 1000 + 0.7;
+     };
+ 
+     function onPointerMove(event: PointerEvent) {
+@@ -214,8 +209,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
+             sx -= 0.04 * arc * cur.hop;
+           }
+         }
+-        // angry trembling: only when the face is tapped or changes to angry, never on its own at launch
+-        if (t < shakeUntil) dx += Math.sin(t * 95) * 2.2 * Math.max(cur.jitter, 0.4);
+       }
+       rot += cur.baseTilt;
+       sy += spring * 0.12;
+diff --git a/ollo-app/src/styles.css b/ollo-app/src/styles.css
+index 284706e..6d46279 100644
+--- a/ollo-app/src/styles.css
++++ b/ollo-app/src/styles.css
+@@ -175,8 +175,7 @@ h1, h2, h3, p { margin: 0; }
+ .lens-track { fill: none; stroke: var(--ink-3); stroke-width: 8; }
+ .lens-fill { fill: none; stroke: var(--signal); stroke-width: 8; stroke-linecap: round; transition: stroke-dasharray 0.7s var(--ease); }
+ .lens.full .lens-fill { stroke: var(--mint); }
+-.lens-num { position: relative; display: grid; justify-items: center; line-height: 1; font-family: var(--font-display); font-weight: 800; font-size: 28px; letter-spacing: -0.03em; }
+-.lens-num small { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0; margin-top: 3px; }
++.lens-num { position: relative; display: grid; place-items: center; color: var(--mint); }
+ 
+ .week { display: flex; gap: 6px; }
+ .week-day { display: grid; justify-items: center; gap: 5px; font-size: 12px; font-weight: 700; color: var(--dim); }
+@@ -214,13 +213,16 @@ h1, h2, h3, p { margin: 0; }
+ .empty { border: 1px dashed var(--line); border-radius: var(--r-lg); padding: 32px 22px; text-align: center; color: var(--muted); display: grid; gap: 14px; justify-items: center; }
+ .empty strong { color: var(--cream); font-family: var(--font-display); font-size: 20px; }
+ 
+-.fab {
++.dock {
+   position: fixed; z-index: 25; right: max(20px, calc(50% - 340px)); bottom: calc(var(--nav-h) + 20px + env(safe-area-inset-bottom));
+-  width: 62px; height: 62px; border: 0; border-radius: 22px; background: var(--signal); color: var(--ink); display: grid; place-items: center; font-size: 32px;
+-  box-shadow: 0 10px 28px rgb(0 0 0 / 0.45);
++  display: flex; align-items: center; gap: 10px;
+ }
+-.fab:active { transform: scale(0.95); }
+-@media (min-width: 900px) { .fab { right: 40px; bottom: 36px; } }
++.fab, .start-btn { height: 62px; border: 0; border-radius: 22px; box-shadow: 0 10px 28px rgb(0 0 0 / 0.45); transition: transform 0.12s; }
++.fab { width: 62px; background: var(--cream); color: var(--ink); display: grid; place-items: center; font-size: 32px; }
++.start-btn { padding: 0 26px 0 22px; background: var(--signal); color: var(--ink); display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 800; font-size: 18px; letter-spacing: -0.005em; }
++.start-btn svg { font-size: 24px; }
++.fab:active, .start-btn:active:not(:disabled) { transform: scale(0.96); }
++@media (min-width: 900px) { .dock { right: 40px; bottom: 36px; } }
+ 
+ /* ───────── Folder screen ───────── */
+ .folder-head { display: grid; gap: 14px; margin: 6px 0 20px; }
+@@ -261,10 +263,10 @@ h1, h2, h3, p { margin: 0; }
+   position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden;
+   border-radius: var(--r-card); padding: 26px 26px 22px; display: flex; flex-direction: column; gap: 12px;
+   color: var(--ink); box-shadow: 0 18px 32px -18px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.55);
+-  cursor: pointer; text-align: center; user-select: text;
++  cursor: pointer; text-align: center; user-select: none;
+ }
+ .face.front { background: var(--cream); }
+-.face.back { background: var(--butter); transform: rotateY(180deg); cursor: default; }
++.face.back { background: var(--cream); transform: rotateY(180deg); }
+ .face-tag { align-self: flex-start; font-size: 13px; font-weight: 800; color: rgb(20 22 29 / 0.62); }
+ .face-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; overscroll-behavior: contain; }
+ .face-text { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-display); font-weight: 700; letter-spacing: -0.015em; line-height: 1.18; max-width: 22em; margin: auto 0; }
+@@ -275,20 +277,16 @@ h1, h2, h3, p { margin: 0; }
+ .face-body img { max-width: 100%; max-height: 38vh; object-fit: contain; border-radius: 12px; cursor: zoom-in; background: #fff; }
+ .face-hint { font-size: 14px; color: rgb(20 22 29 / 0.55); font-weight: 700; }
+ 
+-.study-actions { display: grid; gap: 10px; padding-top: 4px; align-content: start; min-height: 150px; }
++.study-actions { display: grid; gap: 10px; padding-top: 4px; align-content: start; min-height: 124px; }
+ .reveal-hint { text-align: center; color: var(--muted); font-size: 14px; }
+ .grades { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+ .grade {
+-  position: relative; min-height: 68px; border: 0; border-radius: 16px; color: var(--ink);
+-  display: grid; align-content: center; justify-items: center; gap: 1px;
+-  font-family: var(--font-display); font-weight: 800; font-size: 17px; transition: transform 0.12s, filter 0.15s;
++  min-height: 46px; border: 0; border-radius: 14px; color: var(--ink);
++  font-family: var(--font-display); font-weight: 750; font-size: 15px; transition: transform 0.12s, filter 0.15s;
+ }
+ .grade:hover { filter: brightness(1.08); }
+ .grade:active { transform: scale(0.96); }
+-.grade small { font-family: var(--font-body); font-weight: 700; font-size: 13px; opacity: 0.72; }
+-.grade kbd { display: none; position: absolute; top: 5px; right: 8px; font-family: var(--font-body); font-size: 11px; font-weight: 700; opacity: 0.5; }
+ .g1 { background: var(--coral); } .g2 { background: var(--amber); } .g3 { background: var(--mint); } .g4 { background: var(--sky); }
+-@media (hover: hover) and (min-width: 900px) { .grade kbd { display: block; } }
+ .study-foot { display: flex; justify-content: center; min-height: 36px; }
+ 
+ /* ───────── Summary ───────── */
+@@ -440,7 +438,6 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
+ @media (max-width: 420px) {
+   .stage { padding-left: 16px; padding-right: 16px; }
+   .face { padding: 22px 18px 18px; }
+-  .grade { min-height: 64px; font-size: 16px; }
+   .today-panel { padding: 16px; }
+ }
+ 
+@@ -451,3 +448,8 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
+   .flipped .face.back { opacity: 1; visibility: visible; }
+   .flipped .face.front { opacity: 0; visibility: hidden; }
+ }
++
++.list-filters { margin-top: 26px; margin-bottom: 6px; }
++.sub-head { font-family: var(--font-display); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; color: var(--muted); margin: 22px 0 4px; }
++.choice.primary-choice { border-color: var(--signal); background: rgb(255 216 74 / 0.08); }
++.choice.primary-choice .choice-icon { background: var(--signal); }
+diff --git a/ollo-app/src/ui/parts.tsx b/ollo-app/src/ui/parts.tsx
+index 9135c9e..e8fd52d 100644
+--- a/ollo-app/src/ui/parts.tsx
++++ b/ollo-app/src/ui/parts.tsx
+@@ -12,7 +12,7 @@ export function Lens({ value, goal }: { value: number; goal: number }) {
+         <rect className="lens-track" x="4" y="4" width="76" height="90" rx="26" />
+         <rect className="lens-fill" x="4" y="4" width="76" height="90" rx="26" pathLength={100} strokeDasharray={`${pct} ${100 - pct}`} style={{ opacity: pct > 0 ? 1 : 0 }} />
+       </svg>
+-      <div className="lens-num">{full ? <CheckIcon style={{ fontSize: 30 }} /> : value}<small>of {goal}</small></div>
++      {full && <div className="lens-num"><CheckIcon style={{ fontSize: 32 }} /></div>}
+     </div>
+   );
+ }

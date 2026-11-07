@@ -1,6 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { isTauri } from '@tauri-apps/api/core';
+import '@fontsource-variable/bricolage-grotesque';
+import '@fontsource/atkinson-hyperlegible/400.css';
+import '@fontsource/atkinson-hyperlegible/700.css';
 import App from './App';
 
 if (!isTauri() && 'serviceWorker' in navigator && import.meta.env.PROD) {

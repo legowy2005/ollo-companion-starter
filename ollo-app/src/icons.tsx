@@ -35,3 +35,10 @@ export const BluetoothIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><pa
 export const SettingsIcon = (p: IconProps) => <Svg {...p} strokeWidth={2}><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></Svg>;
 export const CloseIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="M6 6l12 12M18 6 6 18" /></Svg>;
 export const ShuffleIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.2}><path d="M3 7h3.5c4 0 6 10 11 10H21M3 17h3.5c1.6 0 2.9-.8 4-2M13.5 9.2C14.7 7.9 16 7 17.5 7H21M18 4l3 3-3 3M18 14l3 3-3 3" /></Svg>;
+export const LibraryIcon = (p: IconProps) => <Svg {...p} strokeWidth={2}><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M7.5 4.5h9" /></Svg>;
+export const GlassesIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.2}><rect x="2.5" y="7.5" width="8.5" height="9.5" rx="3" /><rect x="13" y="7.5" width="8.5" height="9.5" rx="3" /><path d="M11 12h2" /></Svg>;
+export const BoltIcon = (p: IconProps) => <Svg {...p} strokeWidth={1.6}><path d="M13.5 2.5 5 13.5h6l-1 8 8.5-11h-6z" fill="currentColor" /></Svg>;
+export const CheckIcon = (p: IconProps) => <Svg {...p} strokeWidth={3}><path d="M5 12.5 9.5 17 19 7.5" /></Svg>;
+export const UndoIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.4}><path d="M9 6 4 11l5 5" /><path d="M4 11h10.5a5 5 0 0 1 0 10H11" /></Svg>;
+export const ImageIcon = (p: IconProps) => <Svg {...p} strokeWidth={2}><rect x="3.5" y="4.5" width="17" height="15" rx="3" /><circle cx="9" cy="10" r="1.8" /><path d="m4 17 5-4.5 3.5 3 3-2.5 4.5 4" /></Svg>;
+export const ChevronRightIcon = (p: IconProps) => <Svg {...p} strokeWidth={2.6}><path d="m9 5 7 7-7 7" /></Svg>;

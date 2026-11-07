@@ -50,7 +50,7 @@ export function dayKey(date: Date = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
-function daysBetween(fromKey: string, toKey: string): number {
+export function daysBetween(fromKey: string, toKey: string): number {
   const [fy, fm, fd] = fromKey.split('-').map(Number);
   const [ty, tm, td] = toKey.split('-').map(Number);
   const from = Date.UTC(fy, fm - 1, fd);
@@ -61,6 +61,13 @@ function daysBetween(fromKey: string, toKey: string): number {
 /** Whole calendar days since the user last practiced (0 = today). */
 export function daysSincePractice(stats: PracticeStats, now: Date = new Date()): number {
   return daysBetween(stats.lastDay, dayKey(now));
+}
+
+/** A missed day is forgiven once a week: the streak keeps going instead of snapping back to 1. */
+export const SHIELD_COOLDOWN_DAYS = 7;
+
+export function shieldAvailable(stats: PracticeStats, today: string): boolean {
+  return !stats.shieldDay || daysBetween(stats.shieldDay, today) >= SHIELD_COOLDOWN_DAYS;
 }
 
 /** Returns the new stats after one card has been practiced. The same card only counts once per day. */
@@ -76,13 +83,20 @@ export function recordPracticeStats(previous: PracticeStats | undefined, cardId:
       todayCount: Math.max(previous.todayCount, known.length) + 1
     };
   }
-  const continuesStreak = previous ? daysBetween(previous.lastDay, today) === 1 : false;
+  const gap = previous ? daysBetween(previous.lastDay, today) : 0;
+  let streak = 1;
+  let shieldDay = previous?.shieldDay;
+  if (previous) {
+    if (gap === 1) streak = previous.streak + 1;
+    else if (gap === 2 && shieldAvailable(previous, today)) { streak = previous.streak + 1; shieldDay = today; }
+  }
   return {
     lastDay: today,
     lastAt: now.getTime(),
     todayCount: 1,
     cardIds: [cardId],
-    streak: continuesStreak && previous ? previous.streak + 1 : 1
+    streak,
+    ...(shieldDay ? { shieldDay } : {})
   };
 }
 

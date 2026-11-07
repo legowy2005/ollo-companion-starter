@@ -2,6 +2,15 @@
 
 This project is a first implementation of the OllO companion application based on the five design screens and the supplied ESP32-S3 firmware.
 
+## Study design (v4 redesign)
+
+- **Sessions, not browsing.** The home screen's main button builds a session from cards that are due plus a few new ones, mixed across folders. Each card is question first, then *Show answer*, then you grade yourself: Again / Hard / Good / Easy. Each button shows when the card will come back.
+- **Scheduler** lives in `src/study/scheduler.ts` (SM-2 family with learning steps). Every number is a named constant at the top of the file. Practice runs (Shuffle / Where I left off) never change the schedule.
+- **Streaks are low-bar.** Any single graded card keeps the streak; the daily goal ring is separate. One missed day per week is forgiven (the "rest day").
+- **Glasses nudge.** The Glasses tab shows a dot when you have edits the glasses haven't received yet. Review schedules are local to the app and are not sent to the glasses.
+- **Keyboard (desktop):** Space reveals, 1-4 grades, Z undoes, Esc leaves.
+- **Fonts** are bundled with the app through `@fontsource` (Bricolage Grotesque for headings, Atkinson Hyperlegible for text), so they work offline in the Windows and mobile builds. Run `npm install` after applying the patch.
+
 ## Platform strategy
 
 The React + TypeScript interface and the OllO data/protocol layer are shared. The native shell differs by platform because standard Chromium Web Bluetooth does not offer reliable saved-device retrieval for hands-free reconnect on Windows.

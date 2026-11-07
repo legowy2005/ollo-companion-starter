@@ -1,0 +1,914 @@
+diff --git a/ollo-app/src/types.ts b/ollo-app/src/types.ts
+--- a/ollo-app/src/types.ts
++++ b/ollo-app/src/types.ts
+@@ -13,12 +13,23 @@
+ export type AppScreen = 'home' | 'folder' | 'study' | 'editor' | 'sync' | 'settings';
+ 
++export interface ReviewState {
++  dueAt: number;
++  intervalDays: number;
++  easeFactor: number;
++  repetitions: number;
++  lapses: number;
++  lastReviewedAt: number;
++}
++
+ export interface Card {
+   id: string;
+   folder: string;
+   front: string;
+   back: string;
+   frontImageId?: number;
+   backImageId?: number;
+   rating?: 1 | 2 | 3 | 4;
+   bookmarked?: boolean;
++  /** App-local review schedule. Not sent to the glasses firmware. */
++  review?: ReviewState;
+ }
+diff --git a/ollo-app/src/learning.ts b/ollo-app/src/learning.ts
+new file mode 100644
+--- /dev/null
++++ b/ollo-app/src/learning.ts
+@@ -0,0 +1,58 @@
++import type { Card, ReviewState } from './types';
++
++export type RecallGrade = 'again' | 'hard' | 'good' | 'easy';
++
++const DAY_MS = 24 * 60 * 60 * 1000;
++const TEN_MINUTES = 10 * 60 * 1000;
++
++/** Cards without a schedule are new and should be introduced in the next review. */
++export function isCardDue(card: Pick<Card, 'review'>, now = Date.now()): boolean {
++  return !card.review || card.review.dueAt <= now;
++}
++
++/**
++ * A deliberately small, transparent interval heuristic for the first OllO release.
++ * It is not FSRS: it uses the learner's recall grade to gradually widen or shorten
++ * the next interval. A production scheduler can replace this without changing the UI.
++ */
++export function scheduleNextReview(
++  previous: ReviewState | undefined,
++  grade: RecallGrade,
++  now = Date.now()
++): ReviewState {
++  const oldInterval = previous?.intervalDays ?? 0;
++  let easeFactor = previous?.easeFactor ?? 2.5;
++  let intervalDays = oldInterval;
++  let repetitions = previous?.repetitions ?? 0;
++  let lapses = previous?.lapses ?? 0;
++  let dueAt: number;
++
++  switch (grade) {
++    case 'again':
++      intervalDays = Math.max(0.1, oldInterval * 0.25);
++      easeFactor = Math.max(1.3, easeFactor - 0.2);
++      repetitions = 0;
++      lapses += 1;
++      dueAt = now + TEN_MINUTES;
++      break;
++    case 'hard':
++      intervalDays = oldInterval > 0 ? Math.max(1, oldInterval * 1.2) : 1;
++      easeFactor = Math.max(1.3, easeFactor - 0.15);
++      repetitions += 1;
++      dueAt = now + intervalDays * DAY_MS;
++      break;
++    case 'good':
++      intervalDays = oldInterval > 0 ? Math.max(1, oldInterval * easeFactor) : 3;
++      repetitions += 1;
++      dueAt = now + intervalDays * DAY_MS;
++      break;
++    case 'easy':
++      intervalDays = oldInterval > 0 ? Math.max(4, oldInterval * easeFactor * 1.3) : 5;
++      easeFactor = Math.min(3.2, easeFactor + 0.15);
++      repetitions += 1;
++      dueAt = now + intervalDays * DAY_MS;
++      break;
++  }
++
++  return { dueAt, intervalDays, easeFactor, repetitions, lapses, lastReviewedAt: now };
++}
+diff --git a/ollo-app/src/App.tsx b/ollo-app/src/App.tsx
+--- a/ollo-app/src/App.tsx
++++ b/ollo-app/src/App.tsx
+@@ -5,6 +5,7 @@
+ import { IMAGE_MODES, displaySrc, finalizeImage, imageModeLabel, prepareImage, type PreparedImage } from './imageCodec';
+ import { bleManager } from './ble/BleManager';
+ import { MAX_FOLDER_BYTES, MAX_TEXT_BYTES, type DeviceInfo, type StorageInfo } from './ble/protocol';
++import { isCardDue, scheduleNextReview, type RecallGrade } from './learning';
+ import { ArrowLeftIcon, ArrowRightIcon, BluetoothIcon, BookmarkIcon, CloseIcon, FlipIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, SettingsIcon, ShuffleIcon, TrashIcon } from './icons';
+ import { Mascot } from './mascot/Mascot';
+ import { FloatyText } from './mascot/FloatyText';
+@@ -12,2 +13,3 @@
+ import { DIRECTOR_RULES, eggDisplay, handleAppOpen, quoteDisplay, resolveQuoteOfTheDay, type Display } from './mascot/director';
+ import './styles.css';
++import './design.css';
+@@ -49,3 +51,4 @@
+   const [studyIds, setStudyIds] = useState<string[] | null>(null);
+   const [studyFrom, setStudyFrom] = useState<'home' | 'folder'>('folder');
++  const [studyMode, setStudyMode] = useState<'practice' | 'review'>('practice');
+   const [playScope, setPlayScope] = useState<'all' | 'folder' | null>(null);
+@@ -188,8 +191,13 @@
+   }, [library, selectedFolder]);
++  const dueCards = useMemo(() => (library?.cards ?? [])
++    .filter((card) => isCardDue(card))
++    .sort((a, b) => (a.review?.dueAt ?? 0) - (b.review?.dueAt ?? 0)), [library]);
++  const folderDueCards = useMemo(() => folderCards.filter((card) => isCardDue(card)), [folderCards]);
+   const studyCards = useMemo(() => {
+     if (!studyIds || !library) return folderCards;
+     const byId = new Map(library.cards.map((card) => [card.id, card]));
+     return studyIds.map((id) => byId.get(id)).filter((card): card is Card => !!card);
+   }, [studyIds, library, folderCards]);
+   const activeStudyCard = studyCards[studyIndex];
++  const studyComplete = screen === 'study' && studyCards.length > 0 && studyIndex >= studyCards.length;
+   const activeStudyImageId = activeStudyCard ? (studyBack ? activeStudyCard.backImageId : activeStudyCard.frontImageId) : undefined;
+@@ -255,4 +263,5 @@
+     const scope = playScope;
+     setPlayScope(null);
+     setStudyBack(false);
++    setStudyMode('practice');
+     setStudyFrom(scope === 'folder' ? 'folder' : 'home');
+@@ -278,4 +287,23 @@
+     setScreen('study');
+   }
+ 
++  function startReview(scope: 'all' | 'folder') {
++    if (!library) return;
++    const pool = scope === 'folder'
++      ? library.cards.filter((card) => card.folder === selectedFolder)
++      : library.cards;
++    const due = pool.filter((card) => isCardDue(card))
++      .sort((a, b) => (a.review?.dueAt ?? 0) - (b.review?.dueAt ?? 0));
++    if (!due.length) {
++      setNotice('You’re all caught up. More reviews will appear when they’re due.');
++      return;
++    }
++    setStudyMode('review');
++    setStudyFrom(scope === 'folder' ? 'folder' : 'home');
++    setStudyIds(due.map((card) => card.id));
++    setStudyIndex(0);
++    setStudyBack(false);
++    setScreen('study');
++  }
++
+   function openFolder(folder: string) {
+@@ -353,4 +378,3 @@
+   function flipStudyCard() {
+-    if (activeStudyCard && !studyBack) recordPractice(activeStudyCard.id);
+     setStudyBack((value) => !value);
+   }
+@@ -383,5 +416,13 @@
+-  function rateCard(rating: 1 | 2 | 3 | 4) {
+-    if (!activeStudyCard) return;
++  function rateCard(grade: RecallGrade) {
++    if (!activeStudyCard || !studyBack) return;
++    const rating: 1 | 2 | 3 | 4 = grade === 'again' ? 4 : grade === 'hard' ? 3 : grade === 'good' ? 2 : 1;
+     recordPractice(activeStudyCard.id);
+-    updateLibrary((previous) => ({ ...previous, cards: previous.cards.map((card) => card.id === activeStudyCard.id ? { ...card, rating } : card) }));
++    updateLibrary((previous) => ({
++      ...previous,
++      cards: previous.cards.map((card) => card.id === activeStudyCard.id
++        ? { ...card, rating, review: scheduleNextReview(card.review, grade) }
++        : card)
++    }));
++    setStudyBack(false);
++    setStudyIndex((value) => value + 1);
+   }
+@@ -486,9 +527,18 @@
+           <div className="motivation-row">
+             <div className={`quote ${display && display.text.length > 44 ? 'long' : ''}`}><FloatyText key={display?.id} text={display?.text ?? ''} /></div>
+             <Mascot mood={mood} />
+           </div>
++          <div className="home-intro">
++            <div><span className="eyebrow">YOUR LEARNING SPACE</span><h1>Your library</h1><p>Small sessions. Stronger recall.</p></div>
++            <div className="library-total"><strong>{library.cards.length}</strong><span>cards</span></div>
++          </div>
++          <button className="review-launch" onClick={() => startReview('all')} disabled={!dueCards.length}>
++            <span className="review-launch-copy"><span className="eyebrow">TODAY'S STUDY QUEUE</span><strong>{dueCards.length ? `${dueCards.length} cards ready` : (library.cards.length ? 'You’re all caught up' : 'Start with one card')}</strong><small>{dueCards.length ? 'A short session of new and due cards.' : (library.cards.length ? 'Your next reviews will appear here.' : 'Add a card to build your learning queue.')}</small></span>
++            <span className="review-launch-action">{dueCards.length ? 'Start session' : (library.cards.length ? 'All clear' : 'No cards yet')} <span aria-hidden="true">→</span></span>
++          </button>
+           <div className="folder-list">
+             {homeFolders.length === 0 ? <div className="empty-state">No folders yet. Add your first flashcard.</div> : homeFolders.map((folder) => {
+               const count = library.cards.filter((card) => card.folder === folder).length;
+-              return <button className="folder-tile" key={folder} onClick={() => openFolder(folder)}><strong>{folder}</strong><span>{count} {count === 1 ? 'card' : 'cards'}</span></button>;
++              const dueCount = library.cards.filter((card) => card.folder === folder && isCardDue(card)).length;
++              return <button className="folder-tile" key={folder} onClick={() => openFolder(folder)}><strong>{folder}</strong><span>{count} {count === 1 ? 'card' : 'cards'} <i>·</i> {dueCount} ready</span></button>;
+             })}
+@@ -517,3 +568,3 @@
+           <div className="folder-management-card">
+             <div className="folder-management-top"><strong>{selectedFolder}</strong><div className="row-actions"><button className="text-icon muted" onClick={renameFolder} aria-label="Rename folder"><PencilIcon /></button><button className="text-icon danger" onClick={deleteFolder} aria-label="Delete folder"><TrashIcon /></button></div></div>
+-            <div className="folder-management-bottom"><span>{folderCards.length} cards</span><span className="synced-label">{library.lastSyncedAt ? 'Synced' : 'Not synced'}</span></div>
++            <div className="folder-management-bottom"><span>{folderCards.length} cards · {folderDueCards.length} ready</span><span className="synced-label">{library.lastSyncedAt ? 'Synced' : 'Not synced'}</span><button className="folder-review-button" onClick={() => startReview('folder')} disabled={!folderDueCards.length}>Study ready</button></div>
+@@ -527,1 +579,1 @@
+-            {folderCards.map((card) => <button className="flashcard-preview" key={card.id} onClick={() => { setSelectedCardId(card.id); setStudyIds(null); setStudyFrom('folder'); setStudyIndex(folderCards.findIndex((item) => item.id === card.id)); setStudyBack(false); setScreen('study'); }}>
++            {folderCards.map((card) => <button className="flashcard-preview" key={card.id} onClick={() => { setSelectedCardId(card.id); setStudyIds(null); setStudyMode('practice'); setStudyFrom('folder'); setStudyIndex(folderCards.findIndex((item) => item.id === card.id)); setStudyBack(false); setScreen('study'); }}>
+@@ -538,14 +590,24 @@
+       {screen === 'study' && (
+         <section className="study-screen">
+-          {activeStudyCard ? <>
+-            <div className="study-card" role="button" tabIndex={0} onClick={flipStudyCard} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); flipStudyCard(); } }}>
++          {studyComplete ? <div className="session-complete">
++            <span className="completion-mark" aria-hidden="true">✓</span>
++            <span className="eyebrow">SESSION COMPLETE</span>
++            <h2>Good work. Let it settle.</h2>
++            <p>You completed {studyCards.length} cards. OllO has scheduled their next reviews based on your recall.</p>
++            <button className="primary-button" onClick={() => setScreen(studyFrom === 'home' ? 'home' : 'folder')}>Back to library</button>
++          </div> : activeStudyCard ? <>
++            <div className="study-session-head"><div><span className="eyebrow">{studyMode === 'review' ? 'STUDY QUEUE' : 'PRACTICE SESSION'}</span><strong>{activeStudyCard.folder}</strong></div><span className="study-session-count">{studyIndex + 1} / {studyCards.length}</span></div>
++            <div className="study-progress-track"><div className="study-progress-fill" style={{ width: `${((studyIndex + 1) / studyCards.length) * 100}%` }} /></div>
++            <div className="study-question-label">{studyBack ? 'ANSWER' : 'QUESTION'}</div>
++            <div className={`study-card ${studyBack ? 'answer-visible' : ''}`} role="button" tabIndex={0} aria-label={studyBack ? 'Answer. Activate to show question' : 'Question. Activate to reveal answer'} onClick={flipStudyCard} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); flipStudyCard(); } }}>
+               {activeStudyImage ? <img src={displaySrc(activeStudyImage)} alt="Flashcard (tap to enlarge)" onClick={(event) => { event.stopPropagation(); setViewerSrc(displaySrc(activeStudyImage)); }} /> : <span>{studyBack ? activeStudyCard.back : activeStudyCard.front}</span>}
+             </div>
+             <div className="study-navigation"><button onClick={() => { setStudyIndex((value) => Math.max(0, value - 1)); setStudyBack(false); }} aria-label="Previous card"><ArrowLeftIcon /></button><button onClick={flipStudyCard} aria-label="Flip card"><FlipIcon /></button><button onClick={() => { setStudyIndex((value) => Math.min(studyCards.length - 1, value + 1)); setStudyBack(false); }} aria-label="Next card"><ArrowRightIcon /></button></div>
+-            <div className="difficulty-rating" aria-label="Rate difficulty to memorize this card">
+-              {([1, 2, 3, 4] as const).map((rating) => <button key={rating} className={`rating-segment rating-${rating} ${activeStudyCard.rating === rating ? 'chosen' : ''}`} onClick={() => rateCard(rating)} title={['Easy', 'Moderate', 'Difficult', 'Very difficult'][rating - 1]} aria-label={`Difficulty ${rating}`} />)}
+-            </div>
+-            <div className="rating-caption">{activeStudyCard.rating ? ['Easy', 'Moderate', 'Difficult', 'Very difficult'][activeStudyCard.rating - 1] : 'How difficult was this to memorize?'}</div>
+-            <div className="study-counter">{studyIndex + 1} / {studyCards.length}</div>
++            {studyBack ? <div className="recall-rating" aria-label="How well did you recall the answer?">
++              <button className="grade-again" onClick={() => rateCard('again')}><strong>Again</strong><span>Didn't recall</span></button>
++              <button className="grade-hard" onClick={() => rateCard('hard')}><strong>Hard</strong><span>Needed effort</span></button>
++              <button className="grade-good" onClick={() => rateCard('good')}><strong>Good</strong><span>Recalled it</span></button>
++              <button className="grade-easy" onClick={() => rateCard('easy')}><strong>Easy</strong><span>Instant recall</span></button>
++            </div> : <p className="study-hint">Think of your answer, then tap the card to reveal it.</p>}
+           </> : <div className="empty-state">This folder has no cards yet.</div>}
+         </section>
+@@ -558,4 +622,6 @@
+       {screen === 'editor' && editorCard && (
+         <section className="editor-screen">
+-                    <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Write the question…' : 'Write the answer…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
+-          <div className="editor-counter">{editorSide === 'front' ? 'FRONT' : 'BACK'} · {byteLength(editorCard[editorSide]).toLocaleString()} bytes</div>
++          <div className="editor-guidance"><span className="eyebrow">MAKE IT MEMORABLE</span><strong>One idea per card.</strong><p>Write a specific question on the front. Put the answer and a short explanation or example on the back.</p></div>
++          <div className="editor-side-indicator">{editorSide === 'front' ? 'PROMPT' : 'ANSWER'}</div>
++          <textarea className="card-editor-text" placeholder={editorSide === 'front' ? 'Ask one clear question…' : 'Write the answer in your own words…'} value={editorCard[editorSide]} onChange={(event) => setEditorCard({ ...editorCard, [editorSide]: event.target.value })} />
++          <div className="editor-counter">{editorSide === 'front' ? 'PROMPT' : 'ANSWER'} · {byteLength(editorCard[editorSide]).toLocaleString()} bytes</div>
+diff --git a/ollo-app/src/design.css b/ollo-app/src/design.css
+new file mode 100644
+--- /dev/null
++++ b/ollo-app/src/design.css
+@@ -0,0 +1,479 @@
++/* OllO's calmer learning-first visual system */
++:root {
++  color-scheme: light;
++  color: #17251d;
++  background: #f3f6f1;
++  --bg: #f3f6f1;
++  --surface: #ffffff;
++  --surface-2: #e9efe8;
++  --cream: #17251d;
++  --muted: #718077;
++  --yellow: #d8ed83;
++  --green: #267553;
++  --orange: #b97835;
++  --red: #b85a52;
++  --border: #e0e8df;
++  --shadow-soft: 0 10px 30px rgba(26, 50, 35, .055);
++}
++
++html { scroll-behavior: smooth; }
++body {
++  background: var(--bg);
++  color: var(--cream);
++  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  letter-spacing: -0.01em;
++}
++button, input, textarea, select { font: inherit; }
++button { -webkit-tap-highlight-color: transparent; }
++button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
++  outline: 3px solid rgba(38, 117, 83, .35);
++  outline-offset: 3px;
++}
++button:disabled { opacity: .55; cursor: not-allowed; }
++
++.app-shell {
++  width: min(100%, 1020px);
++  min-height: 100vh;
++  padding: max(20px, env(safe-area-inset-top)) 34px max(30px, env(safe-area-inset-bottom));
++  overflow: visible;
++}
++.topbar {
++  min-height: 62px;
++  margin-bottom: 12px;
++  gap: 12px;
++}
++.topbar .icon-button, .topbar .icon-button.big {
++  width: 44px;
++  height: 44px;
++  flex-basis: 44px;
++  border: 1px solid var(--border);
++  border-radius: 14px;
++  background: var(--surface);
++  color: var(--cream);
++  box-shadow: none;
++  font-size: 22px;
++}
++.topbar .icon-button.active { background: var(--yellow); border-color: transparent; }
++.topbar .back-button { background: transparent; border-color: transparent; color: var(--cream); }
++.topbar .pill-button {
++  min-width: 0;
++  padding: 10px 18px;
++  border-radius: 12px;
++  background: var(--cream);
++  color: #fff;
++  box-shadow: none;
++  font-size: 13px;
++  font-weight: 750;
++  letter-spacing: .02em;
++  text-transform: uppercase;
++}
++.search-input {
++  width: min(310px, 48vw);
++  padding: 11px 14px;
++  border: 1px solid var(--border);
++  border-radius: 12px;
++  background: var(--surface);
++  color: var(--cream);
++}
++.page-heading { color: var(--cream); font-size: 15px; letter-spacing: .11em; }
++
++.home-screen, .folder-screen, .study-screen, .editor-screen, .sync-screen, .settings-screen {
++  min-height: calc(100vh - 110px);
++}
++.motivation-row {
++  min-height: 184px;
++  padding: 6px 4px 16px;
++  gap: 22px;
++}
++.quote {
++  max-width: 520px;
++  color: #2a684d;
++  font-family: inherit;
++  font-size: clamp(20px, 3.3vw, 29px);
++  font-weight: 720;
++  letter-spacing: -.045em;
++  line-height: 1.25;
++  transform: none;
++}
++.ollo-mascot { width: clamp(138px, 26vw, 206px); color: #193a2b; cursor: default; }
++.floaty-quote, .floaty-word, .floaty-word > span { animation: none !important; opacity: 1 !important; transform: none !important; }
++
++.home-intro {
++  display: flex;
++  align-items: flex-end;
++  justify-content: space-between;
++  gap: 20px;
++  padding: 10px 2px 18px;
++}
++.eyebrow {
++  display: block;
++  color: var(--muted);
++  font-size: 10px;
++  font-weight: 800;
++  letter-spacing: .14em;
++  line-height: 1.3;
++}
++.home-intro h1 {
++  margin: 5px 0 2px;
++  color: var(--cream);
++  font-size: clamp(26px, 4vw, 34px);
++  font-weight: 780;
++  letter-spacing: -.055em;
++  line-height: 1.08;
++}
++.home-intro p { margin: 5px 0 0; color: var(--muted); font-size: 14px; }
++.library-total {
++  display: flex;
++  align-items: baseline;
++  gap: 6px;
++  padding: 8px 0 4px 14px;
++  color: var(--muted);
++  white-space: nowrap;
++}
++.library-total strong { color: var(--cream); font-size: 26px; letter-spacing: -.05em; }
++.library-total span { font-size: 12px; }
++
++.review-launch {
++  width: 100%;
++  min-height: 112px;
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 20px;
++  margin: 0 0 28px;
++  padding: 21px 23px;
++  border: 1px solid transparent;
++  border-radius: 20px;
++  background: #183d2c;
++  color: #fff;
++  text-align: left;
++  box-shadow: var(--shadow-soft);
++  transition: transform .16s ease, background .16s ease;
++}
++.review-launch:not(:disabled):active { transform: scale(.99); }
++.review-launch .eyebrow { color: #b6d4be; }
++.review-launch-copy { display: flex; flex-direction: column; gap: 5px; }
++.review-launch-copy strong { color: #fff; font-size: 23px; font-weight: 760; letter-spacing: -.04em; }
++.review-launch-copy small { color: #d4e3d7; font-size: 12px; }
++.review-launch-action {
++  display: inline-flex;
++  align-items: center;
++  gap: 13px;
++  padding: 11px 14px;
++  border-radius: 12px;
++  background: #d8ed83;
++  color: #183d2c;
++  font-size: 12px;
++  font-weight: 800;
++  white-space: nowrap;
++}
++.review-launch:disabled { background: #e7eee6; border-color: var(--border); color: var(--cream); opacity: 1; }
++.review-launch:disabled .eyebrow, .review-launch:disabled .review-launch-copy small { color: var(--muted); }
++.review-launch:disabled .review-launch-copy strong { color: var(--cream); }
++.review-launch:disabled .review-launch-action { background: #dce8dc; color: #587261; }
++
++.folder-list {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 13px;
++  padding: 0 0 130px;
++}
++.folder-tile {
++  min-height: 104px;
++  padding: 19px 20px;
++  border: 1px solid var(--border);
++  border-radius: 17px;
++  background: var(--surface);
++  color: var(--cream);
++  box-shadow: var(--shadow-soft);
++  transition: transform .16s ease, border-color .16s ease;
++}
++.folder-tile:active { transform: scale(.985); }
++.folder-tile strong { font-size: 17px; font-weight: 720; letter-spacing: -.03em; }
++.folder-tile span { margin-top: 7px; color: var(--muted); font-size: 12px; }
++.folder-tile i { padding: 0 3px; color: #a2afa4; font-style: normal; }
++.home-bottom-actions {
++  width: min(calc(100% - 44px), 930px);
++  bottom: max(20px, env(safe-area-inset-bottom));
++  justify-content: flex-end;
++  gap: 11px;
++}
++.home-bottom-actions::before { height: 112px; background: linear-gradient(to bottom, transparent, var(--bg) 72%); }
++.floating-play, .floating-add {
++  width: 54px;
++  height: 54px;
++  border-radius: 17px;
++  background: #183d2c;
++  color: #fff;
++  box-shadow: 0 8px 22px rgba(20, 55, 37, .18);
++  font-size: 25px;
++}
++.floating-add { border-radius: 50%; background: var(--yellow); color: #233b2a; }
++.settings-shortcut {
++  width: 48px;
++  height: 48px;
++  border: 1px solid var(--border);
++  border-radius: 50%;
++  background: var(--surface);
++  color: var(--muted);
++  font-size: 21px;
++}
++
++.folder-management-card {
++  margin-bottom: 19px;
++  padding: 20px;
++  border: 1px solid var(--border);
++  border-radius: 18px;
++  background: var(--surface);
++  box-shadow: var(--shadow-soft);
++}
++.folder-management-top { padding-bottom: 14px; border-bottom: 1px solid var(--border); }
++.folder-management-top strong { font-size: clamp(21px, 4vw, 27px); letter-spacing: -.045em; }
++.row-actions { gap: 14px; }
++.text-icon { font-size: 21px; }
++.folder-management-bottom {
++  align-items: center;
++  flex-wrap: wrap;
++  gap: 12px 18px;
++  padding-top: 14px;
++  color: var(--muted);
++  font-size: 12px;
++}
++.synced-label { color: var(--green); }
++.folder-review-button {
++  margin-left: auto;
++  border: 0;
++  border-radius: 10px;
++  padding: 9px 13px;
++  background: #e6f0e7;
++  color: #245f43;
++  font-size: 12px;
++  font-weight: 750;
++}
++.folder-card-list {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 13px;
++  padding-bottom: 100px;
++}
++.flashcard-preview {
++  min-height: 155px;
++  padding: 22px;
++  border: 1px solid var(--border);
++  border-radius: 17px;
++  background: var(--surface);
++  color: var(--cream);
++  box-shadow: var(--shadow-soft);
++  font-size: clamp(15px, 2vw, 19px);
++  font-weight: 600;
++  line-height: 1.45;
++}
++.flashcard-preview img { max-height: 160px; }
++
++.study-screen {
++  width: min(100%, 740px);
++  min-height: calc(100vh - 110px);
++  margin: 0 auto;
++  padding-bottom: 24px;
++}
++.study-session-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin: 8px 2px 12px; }
++.study-session-head > div { display: flex; flex-direction: column; gap: 5px; }
++.study-session-head strong { color: var(--cream); font-size: 16px; font-weight: 750; }
++.study-session-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
++.study-progress-track { width: 100%; height: 5px; overflow: hidden; border-radius: 99px; background: #e1e9e1; }
++.study-progress-fill { height: 100%; border-radius: inherit; background: var(--green); transition: width .24s ease; }
++.study-question-label { margin: 27px 4px 10px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .14em; }
++.study-card {
++  min-height: min(54vh, 480px);
++  padding: clamp(28px, 5vw, 54px);
++  border: 1px solid var(--border);
++  border-radius: 23px;
++  background: var(--surface);
++  color: #17251d;
++  box-shadow: 0 16px 40px rgba(26, 50, 35, .07);
++  font-size: clamp(23px, 4vw, 34px);
++  font-weight: 620;
++  letter-spacing: -.035em;
++  line-height: 1.35;
++  overflow-wrap: anywhere;
++  transition: border-color .18s ease;
++}
++.study-card.answer-visible { border-color: #b6d8bf; background: #fbfdf9; }
++.study-card > span { max-width: 30ch; }
++.study-card img { max-width: 100%; max-height: 48vh; }
++.study-navigation { justify-content: center; gap: 30px; padding: 13px 0 2px; }
++.study-navigation button {
++  width: 48px;
++  height: 48px;
++  border: 1px solid var(--border);
++  border-radius: 14px;
++  background: var(--surface);
++  color: var(--cream);
++  font-size: 21px;
++}
++.study-hint { margin: 12px 0 0; color: var(--muted); text-align: center; font-size: 12px; }
++.recall-rating { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
++.recall-rating button {
++  min-height: 68px;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  gap: 4px;
++  border: 1px solid transparent;
++  border-radius: 13px;
++  color: #26382c;
++  transition: transform .12s ease, filter .12s ease;
++}
++.recall-rating button:active { transform: scale(.97); }
++.recall-rating strong { font-size: 14px; font-weight: 800; }
++.recall-rating span { font-size: 10px; opacity: .78; }
++.grade-again { background: #f8e9e5; border-color: #f0d4cd !important; }
++.grade-hard { background: #fbf0dc; border-color: #f1e3c5 !important; }
++.grade-good { background: #e5f1e6; border-color: #d4e7d7 !important; }
++.grade-easy { background: #e2efee; border-color: #cfe3df !important; }
++.session-complete {
++  min-height: min(65vh, 560px);
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  padding: 35px 22px;
++  border: 1px solid var(--border);
++  border-radius: 22px;
++  background: var(--surface);
++  box-shadow: var(--shadow-soft);
++  text-align: center;
++}
++.completion-mark {
++  width: 58px;
++  height: 58px;
++  display: grid;
++  place-items: center;
++  margin-bottom: 20px;
++  border-radius: 50%;
++  background: #e5f1e6;
++  color: var(--green);
++  font-size: 28px;
++  font-weight: 800;
++}
++.session-complete h2 { margin: 10px 0 5px; font-size: 27px; letter-spacing: -.05em; }
++.session-complete p { max-width: 38ch; margin: 0 0 22px; color: var(--muted); font-size: 14px; line-height: 1.6; }
++
++.editor-screen { gap: 12px; }
++.editor-guidance {
++  display: flex;
++  flex-direction: column;
++  gap: 5px;
++  margin-bottom: 5px;
++  padding: 16px 18px;
++  border: 1px solid var(--border);
++  border-radius: 15px;
++  background: #eaf1e9;
++}
++.editor-guidance strong { font-size: 15px; }
++.editor-guidance p { margin: 0; color: #607166; font-size: 12px; line-height: 1.5; }
++.editor-side-indicator { margin: 6px 2px -5px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .14em; }
++.card-editor-text, .text-field, .settings-field select {
++  border: 1px solid var(--border);
++  border-radius: 15px;
++  background: var(--surface);
++  color: var(--cream);
++}
++.card-editor-text {
++  min-height: min(42vh, 370px);
++  padding: 30px 24px;
++  font-size: clamp(21px, 4vw, 28px);
++  font-weight: 600;
++  letter-spacing: -.025em;
++  line-height: 1.45;
++}
++.card-editor-text::placeholder { color: #a1ada4; }
++.editor-counter { color: var(--muted); font-size: 11px; }
++.editor-image-preview { border: 1px solid var(--border); background: var(--surface); }
++.editor-image-preview strong { color: var(--cream); }
++.soft-button { border: 1px solid var(--border); background: var(--surface-2); color: var(--cream); font-size: 14px; font-weight: 700; }
++.primary-button {
++  min-height: 48px;
++  border-radius: 13px;
++  padding: 13px 19px;
++  background: var(--green);
++  color: #fff;
++  font-size: 13px;
++  font-weight: 800;
++  letter-spacing: .02em;
++}
++.save-button { width: 100%; }
++.flip-editor { color: var(--green); font-size: 34px; }
++
++.modal-backdrop { background: rgba(15, 31, 21, .48); backdrop-filter: blur(5px); }
++.image-picker-modal { border: 1px solid var(--border); border-radius: 21px; background: var(--surface); color: var(--cream); box-shadow: 0 22px 60px rgba(10, 30, 18, .2); }
++.modal-title { font-size: 21px; letter-spacing: -.04em; }
++.image-picker-modal p { color: var(--muted); line-height: 1.55; }
++.mode-preview { border: 1px solid var(--border); background: #f5f7f4; color: var(--cream); }
++.mode-preview.selected { border-color: var(--green); background: #eaf3e9; }
++.mode-preview-size { color: var(--muted); }
++.play-option { border: 1px solid var(--border); background: #f7f9f6; color: var(--cream); }
++.play-option-icon { background: #e5f0e6; color: var(--green); }
++
++.sync-screen, .settings-screen { gap: 13px; }
++.device-panel, .settings-card, .quote-editor {
++  border: 1px solid var(--border);
++  border-radius: 17px;
++  background: var(--surface);
++  box-shadow: var(--shadow-soft);
++}
++.device-panel { padding: 21px; }
++.device-heading strong { font-size: 20px; }
++.device-heading span, .connection-message { color: var(--muted); }
++.bluetooth-symbol { width: 52px; height: 52px; border-radius: 14px; background: #e8f0e9; color: var(--green); font-size: 28px; }
++.panel-divider { height: 1px; background: var(--border); }
++.storage-label { color: var(--muted); }
++.storage-track { height: 9px; border: 0; background: #e7eee6; }
++.storage-fill { background: var(--green); }
++.stat-tile { min-height: 100px; border: 1px solid var(--border); background: #f6f8f5; }
++.stat-tile span { color: var(--muted); }
++.stat-tile strong { color: var(--cream); font-family: inherit; font-size: 24px; font-weight: 750; }
++.protocol-note, .last-sync, .settings-footnote { color: var(--muted); }
++.disconnect-button { color: var(--red); font-size: 13px; font-weight: 750; }
++.settings-card { padding: 16px; }
++.settings-card span { color: var(--muted); }
++.settings-card input { accent-color: var(--green); }
++.quote-editor { padding: 17px; }
++.quote-editor-title { font-size: 16px; }
++.quote-editor p, .mode-hint { color: var(--muted); }
++.quote-editor textarea.text-field { min-height: 80px; }
++.mascot-preview { width: 108px; color: #193a2b; }
++.custom-quote { border: 1px solid var(--border); background: #f5f7f4; }
++.custom-quote-emotion { border-color: var(--border); background: var(--surface); color: var(--cream); }
++.settings-field { color: var(--muted); }
++.forget-device { background: #f8e9e5; color: #8b433b; }
++.empty-state { border-color: #cbd8cb; color: var(--muted); }
++.toast { background: #183d2c; color: #fff; box-shadow: 0 8px 26px rgba(15, 43, 28, .2); }
++.loading-screen { color: var(--muted); }
++.loading-screen .ollo-mascot { color: #193a2b; }
++
++@media (min-width: 760px) {
++  .app-shell { padding-top: 24px; }
++  .motivation-row { min-height: 180px; }
++  .study-screen { min-height: 650px; }
++  .study-card { min-height: 420px; }
++}
++@media (max-width: 600px) {
++  .app-shell { padding-left: 20px; padding-right: 20px; }
++  .motivation-row { min-height: 165px; gap: 8px; }
++  .quote { font-size: clamp(18px, 5vw, 23px); }
++  .ollo-mascot { width: clamp(128px, 40vw, 170px); }
++  .folder-list, .folder-card-list { grid-template-columns: 1fr; gap: 11px; }
++  .folder-tile { min-height: 88px; }
++  .folder-card-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
++  .flashcard-preview { min-height: 130px; padding: 14px; font-size: 15px; }
++  .review-launch { align-items: flex-start; flex-direction: column; gap: 14px; padding: 18px; }
++  .review-launch-action { align-self: stretch; justify-content: space-between; }
++  .recall-rating { grid-template-columns: repeat(2, minmax(0, 1fr)); }
++  .study-card { min-height: min(48vh, 410px); }
++  .home-bottom-actions { width: calc(100% - 40px); }
++}
++@media (prefers-reduced-motion: reduce) {
++  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
++}
+diff --git a/ollo-app/src/mascot/Mascot.tsx b/ollo-app/src/mascot/Mascot.tsx
+--- a/ollo-app/src/mascot/Mascot.tsx
++++ b/ollo-app/src/mascot/Mascot.tsx
+@@ -78,13 +78,6 @@
+ const BROW_X = [165, 328.5];
+ const BROW_Y = 172;
+ 
+-const SPARKLES = [
+-  { x: 402, y: 150, size: 1, phase: 0 },
+-  { x: 86, y: 168, size: 0.7, phase: 2.1 },
+-  { x: 414, y: 238, size: 0.55, phase: 4.2 }
+-];
+-const SPARKLE_PATH = 'M0 -10 L2.6 -2.6 L10 0 L2.6 2.6 L0 10 L-2.6 2.6 L-10 0 L-2.6 -2.6Z';
+-
+ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+ const rand = (min: number, max: number) => min + Math.random() * (max - min);
+ const ease = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
+@@ -98,16 +91,12 @@
+   /** Optional legacy entrance flag. Disabled by default. */
+   pop?: boolean;
+   label?: string;
+ }
+ 
+-export function Mascot({ mood, className = '', pop = true, label }: Props) {
++export function Mascot({ mood, className = '', pop = false, label }: Props) {
+   const svgRef = useRef<SVGSVGElement>(null);
+   const moodRef = useRef<Mood>(mood);
+-  const reactRef = useRef<(strength: number) => void>(() => {});
+-  const firstMood = useRef(true);
+ 
+   useEffect(() => {
+     moodRef.current = mood;
+-    if (firstMood.current) { firstMood.current = false; return; }
+-    reactRef.current(1);
+   }, [mood]);
+@@ -125,6 +114,5 @@
+     const eyeGroups = qa<SVGGElement>('[data-part=eye]');
+     const smileGroups = qa<SVGGElement>('[data-part=smile]');
+     const brows = qa<SVGGElement>('[data-part=brow]');
+-    const sparkles = qa<SVGPathElement>('[data-part=sparkle]');
+ 
+     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+@@ -138,20 +126,9 @@
+     let nextWander = 0.9;
+     let lastPointer = -99;
+     let pointerGx = 0, pointerGy = 0;
+-    let spring = 0, springV = 0;      // squash & stretch for taps and mood changes
+-    let nextHop = 3.2;
+-    let hopStart = -99;
+-    let shakeUntil = 0;
+-    let nextShake = rand(1.5, 3.5);
+     let startT = -1;
+     let last = 0;
+     let raf = 0;
+     const popDelay = 0.08;
+ 
+-    reactRef.current = (strength: number) => {
+-      springV += 7 * strength;
+-      blinkUntil = performance.now() / 1000 + 0.12;
+-      if (moodRef.current === 'angry') shakeUntil = performance.now() / 1000 + 0.7;
+-    };
+-
+     function onPointerMove(event: PointerEvent) {
+@@ -212,34 +192,6 @@
+       gx += (tgx - gx) * ease(14, dt);
+       gy += (tgy - gy) * ease(14, dt);
+ 
+-      // ---- spring for squash & stretch
+-      springV += (-90 * spring - 9 * springV) * dt;
+-      spring += springV * dt;
+-
+-      // ---- body motion
+-      let dx = 0, dy = cur.offsetY, rot = 0, sx = 1, sy = 1;
+-      if (!reduced) {
+-        const w = (Math.PI * 2) / cur.floatPeriod;
+-        dy += Math.sin(t * w) * cur.floatAmp;
+-        dx += Math.sin(t * w * 0.5 + 1) * 2.5;
+-        rot += Math.sin(t * w * 0.7) * cur.tilt;
+-        // happy hop
+-        if (cur.hop > 0.05) {
+-          if (t >= nextHop) { hopStart = t; nextHop = t + rand(cur.hopGap * 0.75, cur.hopGap * 1.3); }
+-          const p = (t - hopStart) / 0.55;
+-          if (p >= 0 && p <= 1) {
+-            const arc = Math.sin(Math.PI * p);
+-            dy -= 18 * arc * cur.hop;
+-            sy += 0.07 * arc * cur.hop;
+-            sx -= 0.04 * arc * cur.hop;
+-          }
+-        }
+-        // angry trembling
+-        if (cur.jitter > 0.05) {
+-          if (t >= nextShake) { shakeUntil = t + rand(0.5, 0.9); nextShake = t + rand(2.4, 4.5); }
+-        }
+-        if (t < shakeUntil) dx += Math.sin(t * 95) * 2.2 * Math.max(cur.jitter, 0.4);
+-      }
+-      rot += cur.baseTilt;
+-      sy += spring * 0.12;
+-      sx -= spring * 0.08;
++      // Keep the mascot's silhouette still. Only the face (eyes, brows and blink)
++      // changes with its mood; no bobbing, hopping, trembling or tap-squash.
++      let dx = 0, dy = 0, rot = 0, sx = 1, sy = 1;
+@@ -318,13 +263,4 @@
+         el.setAttribute('opacity', clamp(cur.brow, 0, 1).toFixed(3));
+       });
+ 
+-      // ---- sparkles
+-      sparkles.forEach((el, i) => {
+-        const s = SPARKLES[i];
+-        const pulse = Math.max(0, Math.sin(t * 2.2 + s.phase));
+-        const size = s.size * cur.sparkle * (0.35 + pulse * 0.9) * 2.4;
+-        el.setAttribute('transform', `translate(${s.x} ${s.y}) rotate(${(t * 25 + s.phase * 40).toFixed(1)}) scale(${size.toFixed(3)})`);
+-        el.setAttribute('opacity', clamp(cur.sparkle * (0.3 + pulse * 0.7), 0, 1).toFixed(3));
+-      });
+-
+       raf = requestAnimationFrame(frame);
+@@ -371,7 +308,6 @@
+           </g>
+         ))}
+       </g>
+-      {SPARKLES.map((_, i) => <path key={i} data-part="sparkle" d={SPARKLE_PATH} fill="currentColor" stroke="none" opacity={0} />)}
+     </svg>
+   );
+ }
+@@ -350,5 +350,4 @@
+       role="img"
+       aria-label={spoken}
+       style={{ opacity: pop ? 0 : 1 }}
+-      onPointerDown={() => reactRef.current(0.8)}
+     >
+diff --git a/ollo-app/src/mascot/mood.ts b/ollo-app/src/mascot/mood.ts
+--- a/ollo-app/src/mascot/mood.ts
++++ b/ollo-app/src/mascot/mood.ts
+@@ -1,13 +1,9 @@
+ import type { Mood, PracticeStats } from '../types';
+ 
+ /**
+- * Tweak these to change how quickly ollo gets upset or proud.
++ * Positive progress can make ollo proud; missed days never trigger guilt or anger.
+  * "Days" are calendar days in the user's local time zone.
+  */
+ export const MOOD_RULES = {
+-  /** Missed this many calendar days (no practice at all) -> sad */
+-  sadAfterDays: 2,
+-  /** Missed this many calendar days -> angry */
+-  angryAfterDays: 3,
+   /** Cards studied today needed for ollo to be proud instead of just happy */
+   proudCardsToday: 10,
+@@ -107,8 +104,6 @@
+   if (daysSince <= 0) {
+     const proud = stats.todayCount >= MOOD_RULES.proudCardsToday || stats.streak >= MOOD_RULES.proudStreakDays;
+     return proud ? 'proud' : 'happy';
+   }
+-  if (daysSince >= MOOD_RULES.angryAfterDays) return 'angry';
+-  if (daysSince >= MOOD_RULES.sadAfterDays) return 'sad';
+   return 'neutral';
+ }
+diff --git a/ollo-app/src/mascot/lines.ts b/ollo-app/src/mascot/lines.ts
+--- a/ollo-app/src/mascot/lines.ts
++++ b/ollo-app/src/mascot/lines.ts
+@@ -45,5 +45,5 @@
+   streak: lines('streak', [
+-    ['{streak} days in a row. Wow.', 'proud'],
++    ['{streak} days in a row. Nice work.', 'proud'],
+     ['Look at you go!', 'excited'],
+-    ['Streak alive. Don’t ruin it.', 'cocky'],
++    ['Nice rhythm. Keep it at your own pace.', 'happy'],
+     ['{streak} days! I’m impressed.', 'proud']
+@@ -60,11 +60,10 @@
+   missed: lines('missed', [
+-    ['I missed you…', 'sad'],
+-    ['Where have you been?', 'sad'],
+-    ['I almost thought you gave up.', 'cocky']
++    ['Welcome back. Pick up wherever you left off.', 'happy'],
++    ['No pressure. One card is a start.', 'neutral'],
++    ['A little review goes a long way.', 'happy']
+   ]),
+   gone: lines('gone', [
+-    ['{days} days. We need to talk.', 'angry'],
+-    ['Oh, NOW you show up.', 'angry'],
+-    ['I almost thought you gave up.', 'cocky'],
+-    ['Cards don’t study themselves!', 'angry']
++    ['Good to see you again. Let’s start small.', 'happy'],
++    ['No need to catch up all at once.', 'neutral'],
++    ['One card at a time. You’ve got this.', 'happy']
+   ])

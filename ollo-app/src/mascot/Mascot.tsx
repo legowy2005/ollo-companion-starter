@@ -3,7 +3,7 @@ import type { Mood } from './mood';
 import './mascot.css';
 
 /**
- * The OllO mascot.
+ * The OllO mascot. (Sparkle particles, the start-up wobble and any shaking when an emotion begins were removed on purpose.)
  *
  * Geometry comes straight from the supplied mascot art (500x500 PNGs): every eye is four rounded bars
  * plus a pill-shaped pupil, with two vertical bars in the middle and optional eyebrows.
@@ -27,8 +27,6 @@ interface Pose {
   browRightRot: number;
   /** 0..1 cross-fade from normal eyes to smiling ^ ^ eyes */
   smile: number;
-  /** 0..1 sparkles */
-  sparkle: number;
   floatAmp: number;
   floatPeriod: number;
   tilt: number;
@@ -48,15 +46,15 @@ interface Pose {
 }
 
 const POSES: Record<Mood, Pose> = {
-  neutral: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0, floatAmp: 6, floatPeriod: 3.8, tilt: 1.6, baseTilt: 0, offsetY: 0, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 2.2, blinkMax: 5.5 },
-  happy: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 1, sparkle: 0, floatAmp: 9, floatPeriod: 2.6, tilt: 2.6, baseTilt: 0, offsetY: -2, jitter: 0, hop: 1, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
+  neutral: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 0, floatAmp: 6, floatPeriod: 3.8, tilt: 1.6, baseTilt: 0, offsetY: 0, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 2.2, blinkMax: 5.5 },
+  happy: { lidTop: 0, lidBottom: 0, pupil: 1, brow: 0, browLeftY: 12, browRightY: 12, browLeftRot: 0, browRightRot: 0, smile: 1, floatAmp: 9, floatPeriod: 2.6, tilt: 2.6, baseTilt: 0, offsetY: -2, jitter: 0, hop: 1, hopGap: 4.3, gazeX: 0, gazeY: 0, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
   // wide open eyes, high brows, quick little hops
-  excited: { lidTop: -5, lidBottom: -3, pupil: 1.2, brow: 1, browLeftY: -13, browRightY: -13, browLeftRot: 0, browRightRot: 0, smile: 0, sparkle: 0.75, floatAmp: 10, floatPeriod: 1.7, tilt: 3.2, baseTilt: 0, offsetY: -4, jitter: 0, hop: 1.5, hopGap: 2.1, gazeX: 0, gazeY: -0.1, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
-  proud: { lidTop: 12, lidBottom: 4, pupil: 1, brow: 1, browLeftY: -9, browRightY: -9, browLeftRot: -3, browRightRot: 3, smile: 0, sparkle: 1, floatAmp: 6, floatPeriod: 4.4, tilt: 1.2, baseTilt: -4, offsetY: -5, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0.45, gazeY: -0.7, gazeWander: 0.25, blinkMin: 3.5, blinkMax: 7 },
+  excited: { lidTop: -5, lidBottom: -3, pupil: 1.2, brow: 1, browLeftY: -13, browRightY: -13, browLeftRot: 0, browRightRot: 0, smile: 0, floatAmp: 10, floatPeriod: 1.7, tilt: 3.2, baseTilt: 0, offsetY: -4, jitter: 0, hop: 1.5, hopGap: 2.1, gazeX: 0, gazeY: -0.1, gazeWander: 0.9, blinkMin: 3, blinkMax: 6 },
+  proud: { lidTop: 12, lidBottom: 4, pupil: 1, brow: 1, browLeftY: -9, browRightY: -9, browLeftRot: -3, browRightRot: 3, smile: 0, floatAmp: 6, floatPeriod: 4.4, tilt: 1.2, baseTilt: -4, offsetY: -5, jitter: 0, hop: 0, hopGap: 4.3, gazeX: 0.45, gazeY: -0.7, gazeWander: 0.25, blinkMin: 3.5, blinkMax: 7 },
   // smug: half-lidded side-eye, one brow up and the other slanted down
-  cocky: { lidTop: 11, lidBottom: 3, pupil: 0.95, brow: 1, browLeftY: -11, browRightY: 4, browLeftRot: -5, browRightRot: -13, smile: 0, sparkle: 0, floatAmp: 5, floatPeriod: 4, tilt: 2.2, baseTilt: 4, offsetY: -2, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.85, gazeY: 0.1, gazeWander: 0.12, blinkMin: 3.5, blinkMax: 7 },
-  sad: { lidTop: 7, lidBottom: 0, pupil: 1, brow: 1, browLeftY: 2, browRightY: 2, browLeftRot: -15, browRightRot: 15, smile: 0, sparkle: 0, floatAmp: 3, floatPeriod: 5.6, tilt: 0.8, baseTilt: 0, offsetY: 7, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.2, gazeY: 0.85, gazeWander: 0.3, blinkMin: 2, blinkMax: 4.5 },
-  angry: { lidTop: 5, lidBottom: 0, pupil: 0.82, brow: 1, browLeftY: 0, browRightY: 0, browLeftRot: 19, browRightRot: -17, smile: 0, sparkle: 0, floatAmp: 3.2, floatPeriod: 1.9, tilt: 0.6, baseTilt: 0, offsetY: 0, jitter: 1, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0.15, gazeWander: 0.12, blinkMin: 4.5, blinkMax: 8 }
+  cocky: { lidTop: 11, lidBottom: 3, pupil: 0.95, brow: 1, browLeftY: -11, browRightY: 4, browLeftRot: -5, browRightRot: -13, smile: 0, floatAmp: 5, floatPeriod: 4, tilt: 2.2, baseTilt: 4, offsetY: -2, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.85, gazeY: 0.1, gazeWander: 0.12, blinkMin: 3.5, blinkMax: 7 },
+  sad: { lidTop: 7, lidBottom: 0, pupil: 1, brow: 1, browLeftY: 2, browRightY: 2, browLeftRot: -15, browRightRot: 15, smile: 0, floatAmp: 3, floatPeriod: 5.6, tilt: 0.8, baseTilt: 0, offsetY: 7, jitter: 0, hop: 0, hopGap: 4.3, gazeX: -0.2, gazeY: 0.85, gazeWander: 0.3, blinkMin: 2, blinkMax: 4.5 },
+  angry: { lidTop: 5, lidBottom: 0, pupil: 0.82, brow: 1, browLeftY: 0, browRightY: 0, browLeftRot: 19, browRightRot: -17, smile: 0, floatAmp: 3.2, floatPeriod: 1.9, tilt: 0.6, baseTilt: 0, offsetY: 0, jitter: 1, hop: 0, hopGap: 4.3, gazeX: 0, gazeY: 0.15, gazeWander: 0.12, blinkMin: 4.5, blinkMax: 8 }
 };
 
 // Measured from the mascot PNGs.
@@ -79,13 +77,6 @@ const FACE_CY = 256;
 const BROW_X = [165, 328.5];
 const BROW_Y = 172;
 
-const SPARKLES = [
-  { x: 402, y: 150, size: 1, phase: 0 },
-  { x: 86, y: 168, size: 0.7, phase: 2.1 },
-  { x: 414, y: 238, size: 0.55, phase: 4.2 }
-];
-const SPARKLE_PATH = 'M0 -10 L2.6 -2.6 L10 0 L2.6 2.6 L0 10 L-2.6 2.6 L-10 0 L-2.6 -2.6Z';
-
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const rand = (min: number, max: number) => min + Math.random() * (max - min);
 const ease = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
@@ -102,12 +93,9 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const moodRef = useRef<Mood>(mood);
   const reactRef = useRef<(strength: number) => void>(() => {});
-  const firstMood = useRef(true);
 
   useEffect(() => {
     moodRef.current = mood;
-    if (firstMood.current) { firstMood.current = false; return; }
-    reactRef.current(1);
   }, [mood]);
 
   useEffect(() => {
@@ -125,7 +113,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
     const eyeGroups = qa<SVGGElement>('[data-part=eye]');
     const smileGroups = qa<SVGGElement>('[data-part=smile]');
     const brows = qa<SVGGElement>('[data-part=brow]');
-    const sparkles = qa<SVGPathElement>('[data-part=sparkle]');
 
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -142,8 +129,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
     let spring = 0, springV = 0;      // squash & stretch for taps and mood changes
     let nextHop = 3.2;
     let hopStart = -99;
-    let shakeUntil = 0;
-    let nextShake = rand(1.5, 3.5);
     let startT = -1;
     let last = 0;
     let raf = 0;
@@ -152,7 +137,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
     reactRef.current = (strength: number) => {
       springV += 7 * strength;
       blinkUntil = performance.now() / 1000 + 0.12;
-      if (moodRef.current === 'angry') shakeUntil = performance.now() / 1000 + 0.7;
     };
 
     function onPointerMove(event: PointerEvent) {
@@ -225,29 +209,14 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
             sx -= 0.04 * arc * cur.hop;
           }
         }
-        // angry trembling
-        if (cur.jitter > 0.05) {
-          if (t >= nextShake) { shakeUntil = t + rand(0.5, 0.9); nextShake = t + rand(2.4, 4.5); }
-        }
-        if (t < shakeUntil) dx += Math.sin(t * 95) * 2.2 * Math.max(cur.jitter, 0.4);
       }
       rot += cur.baseTilt;
       sy += spring * 0.12;
       sx -= spring * 0.08;
 
-      // ---- pop in
+      // ---- entrance: a plain fade. No springy wobble, no lift.
       let opacity = 1;
-      if (pop) {
-        const pt = Math.max(0, age - popDelay);
-        if (reduced) {
-          opacity = clamp(pt / 0.25, 0, 1);
-        } else {
-          opacity = clamp(pt / 0.14, 0, 1);
-          const s = 1 - Math.exp(-5.5 * pt) * Math.cos(13 * pt) * 0.75;
-          const lift = Math.exp(-5 * pt) * 46;
-          sx *= s; sy *= s; dy += lift;
-        }
-      }
+      if (pop) opacity = clamp((age - popDelay) / (reduced ? 0.25 : 0.35), 0, 1);
 
       body.setAttribute('transform', `translate(${dx.toFixed(2)} ${dy.toFixed(2)}) translate(${FACE_CX} ${FACE_CY}) rotate(${rot.toFixed(2)}) scale(${sx.toFixed(3)} ${sy.toFixed(3)}) translate(${-FACE_CX} ${-FACE_CY})`);
       svg!.style.opacity = String(opacity);
@@ -296,15 +265,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
         el.setAttribute('opacity', clamp(cur.brow, 0, 1).toFixed(3));
       });
 
-      // ---- sparkles
-      sparkles.forEach((el, i) => {
-        const s = SPARKLES[i];
-        const pulse = Math.max(0, Math.sin(t * 2.2 + s.phase));
-        const size = s.size * cur.sparkle * (0.35 + pulse * 0.9) * 2.4;
-        el.setAttribute('transform', `translate(${s.x} ${s.y}) rotate(${(t * 25 + s.phase * 40).toFixed(1)}) scale(${size.toFixed(3)})`);
-        el.setAttribute('opacity', clamp(cur.sparkle * (0.3 + pulse * 0.7), 0, 1).toFixed(3));
-      });
-
       raf = requestAnimationFrame(frame);
     }
     raf = requestAnimationFrame(frame);
@@ -351,7 +311,6 @@ export function Mascot({ mood, className = '', pop = true, label }: Props) {
           </g>
         ))}
       </g>
-      {SPARKLES.map((_, i) => <path key={i} data-part="sparkle" d={SPARKLE_PATH} fill="currentColor" stroke="none" opacity={0} />)}
     </svg>
   );
 }

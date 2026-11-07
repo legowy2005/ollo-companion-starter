@@ -4,8 +4,8 @@
   "description": "Manage and synchronize your OllO smart glasses.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#262626",
-  "theme_color": "#262626",
+  "background_color": "#14161d",
+  "theme_color": "#14161d",
   "icons": [
     { "src": "/ollo-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

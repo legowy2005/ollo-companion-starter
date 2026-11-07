@@ -10,7 +10,25 @@ export interface Quote {
   emotion: QuoteEmotion;
 }
 
-export type AppScreen = 'home' | 'folder' | 'study' | 'editor' | 'sync' | 'settings';
+export type AppScreen = 'home' | 'folder' | 'study' | 'summary' | 'editor' | 'sync' | 'settings';
+
+/** How the learner judged an answer: 1 = Again, 2 = Hard, 3 = Good, 4 = Easy. */
+export type Grade = 1 | 2 | 3 | 4;
+
+/** When a card is due again. Cards without one have never been studied. */
+export interface Schedule {
+  state: 'learning' | 'review';
+  /** Epoch ms when the card should come back */
+  due: number;
+  /** Review interval in days (while relearning: the interval to return to after the card is recalled) */
+  interval: number;
+  ease: number;
+  reps: number;
+  lapses: number;
+  /** Position in the learning steps */
+  step: number;
+  last?: number;
+}
 
 export interface Card {
   id: string;
@@ -19,7 +37,11 @@ export interface Card {
   back: string;
   frontImageId?: number;
   backImageId?: number;
+  /** Legacy 4-level difficulty (1 easy ... 4 very difficult). Still written on every grade; the scheduler uses `sched`. */
   rating?: 1 | 2 | 3 | 4;
+  sched?: Schedule;
+  /** Last time the text, images or folder changed (epoch ms). Used to tell when the glasses are out of date. */
+  updatedAt?: number;
   bookmarked?: boolean;
 }
 
@@ -46,6 +68,8 @@ export interface AppSettings {
   /** Mix the built-in quotes into the quote of the day. */
   useBuiltInQuotes: boolean;
   defaultImageMode: ImageMode;
+  /** Cards to review per day. Sets the size of a session and fills the goal ring. */
+  dailyGoal: number;
 }
 
 /** Bookkeeping for ollo's personality (when the app was opened, what he last said, ...). */
@@ -75,6 +99,8 @@ export interface PracticeStats {
   cardIds?: string[];
   /** Consecutive days practiced, ending at lastDay */
   streak: number;
+  /** Day a rest day was last used to save a streak (one missed day is forgiven per week) */
+  shieldDay?: string;
 }
 
 export interface LibraryData {
@@ -84,6 +110,8 @@ export interface LibraryData {
   lastStudied?: { folder: string; cardId: string };
   lastCardByFolder?: Record<string, string>;
   practice?: PracticeStats;
+  /** Unique cards reviewed per local day (YYYY-MM-DD), kept for about three months. */
+  history?: Record<string, number>;
   meta?: MascotMeta;
   quoteOfTheDay?: QuoteOfTheDay;
   lastSyncedAt?: number;
@@ -95,7 +123,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   motivationalQuote: "Who's gonna carry the boats!",
   customQuotes: [],
   useBuiltInQuotes: true,
-  defaultImageMode: 'gray2'
+  defaultImageMode: 'gray2',
+  dailyGoal: 10
 };
 
 export const DEMO_CARDS: Card[] = [
